@@ -1,0 +1,23 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>OpenCode overview</title><link rel="stylesheet" href="overview.css"><link rel="stylesheet" href="/assets/theme.css"></head>
+<body><main class="ov">
+  <header>
+    <div><p class="eyebrow">Agent workspace</p><h1>OpenCode</h1></div>
+    <div class="head-actions"><span class="state" id="state">checking</span><button class="icon" id="open" type="button" title="Open workspace" aria-label="Open workspace">↗</button></div>
+  </header>
+  <form id="launch">
+    <textarea id="prompt" rows="2" placeholder="What should OpenCode work on?" aria-label="Prompt"></textarea>
+    <div class="controls">
+      <select id="model" aria-label="Model" disabled><option>Loading models…</option></select>
+      <button class="start" id="start" type="submit" disabled>Start session</button>
+    </div>
+  </form>
+  <div class="sessions">
+    <button class="sessions-toggle" id="sessionsToggle" type="button" aria-expanded="false"><span>Recent sessions</span><span id="sessionsChevron">▾</span></button>
+    <div class="session-menu" id="sessionMenu" hidden>
+      <div class="session-list" id="sessionList"></div>
+      <div class="session-more" id="sessionMore">Scroll for earlier sessions</div>
+    </div>
+  </div>
+  <p class="feedback" id="feedback"></p>
+</main><script src="overview.js"></script></body></html>

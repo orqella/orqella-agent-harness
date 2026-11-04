@@ -1,0 +1,43 @@
+schema = 1
+id = "opencode"
+name = "OpenCode"
+version = "0.2.1"
+api_version = "1"
+description = "An installable OpenCode workspace module."
+entry = "ui/index.html"
+overview = "ui/overview.html"
+overview_default = true
+icon = "ui/icon.svg"
+node_scope = "node"
+permissions = ["backend", "storage", "node.proxy:opencode", "app.open"]
+
+[ui]
+surface = "page"
+
+[backend]
+kind = "sidecar"
+command = ["python3", "backend/server.py"]
+health_path = "/health"
+ready_timeout_ms = 15000
+sandbox = false
+read_paths = ["~/.config/opencode", "~/.local/state/opencode", "~/Library/Application Support/opencode"]
+
+[[config.fields]]
+key = "base_url"
+type = "text"
+label = "OpenCode URL"
+default = "http://127.0.0.1:49374"
+help = "The local OpenCode service address."
+
+[[config.fields]]
+key = "show_connection_details"
+type = "boolean"
+label = "Show connection details"
+default = true
+help = "Show the upstream address in the overview card."
+
+[[config.fields]]
+key = "show_overview_button"
+type = "boolean"
+label = "Show open button in overview"
+default = true
