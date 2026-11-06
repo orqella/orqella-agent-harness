@@ -5,7 +5,10 @@ This is a normal Orqella module, not part of the daemon. It demonstrates:
 - a sidecar backend;
 - module-declared settings;
 - a page and an overview card;
-- a generic app handoff using `app.open` with an authenticated `path` (the auth token is passed through the URL and removed by OpenCode).
+- a generic app handoff using `app.open` with an authenticated `path` (the auth token is passed through the URL and removed by OpenCode);
+- deep links to a session through `?session=<id>`, used by Orqella's
+  `conversation.open` hook. The module derives OpenCode's `/server/<key>/session/<id>`
+  route and pairs before opening it.
 
 Install it with:
 

@@ -1,7 +1,7 @@
 schema = 1
 id = "opencode"
 name = "OpenCode"
-version = "0.2.2"
+version = "0.2.4"
 api_version = "1"
 description = "An installable OpenCode workspace module."
 entry = "ui/index.html"

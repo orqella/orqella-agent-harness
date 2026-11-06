@@ -3,6 +3,7 @@
   let context = { node: { id: "local", name: "local" }, config: {} };
   let busy = false;
   let opened = false;
+  const sessionParam = new URLSearchParams(location.search).get("session") || "";
 
   const backend = (path, method = "GET", body) => window.orqella.call("backend.request", {
     method,
@@ -14,6 +15,11 @@
     $("title").textContent = title;
     $("detail").textContent = detail;
     $("actions").hidden = false;
+  };
+
+  const sessionPath = (_appUrl, session) => {
+    if (!session) return "";
+    return `/server/{server_key}/session/${encodeURIComponent(session)}`;
   };
 
   const openWithPair = async (path) => {
@@ -41,7 +47,7 @@
         return;
       }
       opened = true;
-      await openWithPair("");
+      await openWithPair(sessionPath(status.url, sessionParam));
     } catch (error) {
       showError("Could not open OpenCode", error.message || "The OpenCode service is unavailable.");
     } finally {
