@@ -43,3 +43,10 @@ locations.
 The module works on Linux, macOS, and Windows when OpenCode is installed and
 its managed service is running. The sidecar uses Python 3.9+ (with the
 `python`/`py -3` fallback) and has no OS-specific UI.
+
+## Steam Deck / immutable Linux
+
+The tested SteamOS setup, including the required `opencode serve --service`
+unit, config import from another machine, proxy mount, and known product gaps,
+is documented in the Orqella core repository:
+[`docs/STEAMDECK.md`](https://github.com/orqella/core/blob/main/docs/STEAMDECK.md).
