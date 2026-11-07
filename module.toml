@@ -1,7 +1,7 @@
 schema = 1
 id = "opencode"
 name = "OpenCode"
-version = "0.2.4"
+version = "0.2.5"
 api_version = "1"
 description = "An installable OpenCode workspace module."
 entry = "ui/index.html"
@@ -19,6 +19,7 @@ kind = "sidecar"
 command = ["python3", "backend/server.py"]
 health_path = "/health"
 ready_timeout_ms = 15000
+python = ">=3.9"
 sandbox = false
 read_paths = ["~/.config/opencode", "~/.local/state/opencode", "~/Library/Application Support/opencode"]
 
