@@ -228,6 +228,7 @@
     if (ctx.config?.show_overview_button === false) $("open").hidden = true;
     feedback("Checking the local service…");
     try {
+      await backend("/api/service");
       status = await window.orqella.call("proxy.status", { mount: "opencode", node: node() });
       $("state").textContent = status.ok ? "live" : "offline";
       $("state").classList.toggle("ok", !!status.ok);

@@ -7,6 +7,10 @@ OpenCode-specific host routes in Orqella.
 import base64
 import json
 import os
+import shutil
+import subprocess
+import threading
+import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.error import HTTPError
 from urllib.parse import parse_qs, quote, urlencode, urlparse
@@ -17,6 +21,11 @@ CONFIG = json.loads(os.environ.get("ORQELLA_MODULE_CONFIG") or "{}")
 HOST_HOME = os.environ.get("ORQELLA_HOST_HOME") or os.path.expanduser("~")
 DEFAULT_BASE_URL = "http://127.0.0.1:49374"
 CONFIGURED_BASE_URL = (CONFIG.get("base_url") or "").rstrip("/")
+SERVICE_START_TIMEOUT = 20
+SERVICE_WAIT_SECONDS = 15
+SERVICE_READY_SECONDS = 10
+_service_lock = threading.Lock()
+_service_ready_until = 0.0
 
 
 def service_candidates():
@@ -48,8 +57,8 @@ def service_config():
         except (OSError, ValueError) as error:
             raise RuntimeError(f"could not read OpenCode service credential at {path}: {error}") from error
     raise RuntimeError(
-        "OpenCode service credential not found. Start OpenCode once so "
-        "service.json is created, then retry."
+        "OpenCode service credential not found. Run `opencode service start` "
+        "(or start OpenCode once) so service.json is created, then retry."
     )
 
 
@@ -64,6 +73,88 @@ def service_base_url():
     return f"http://127.0.0.1:{port}"
 
 
+def service_health():
+    """Return true when the configured service answers with its credential."""
+    try:
+        service, _path = service_config()
+        password = service.get("password") or ""
+        request = Request(
+            service_base_url() + "/api/info",
+            headers={
+                "Authorization": "Basic "
+                + base64.b64encode(f"opencode:{password}".encode()).decode()
+            },
+        )
+        with urlopen(request, timeout=2) as response:
+            return 200 <= response.status < 300
+    except Exception:
+        return False
+
+
+def opencode_binary():
+    """Find the OpenCode CLI without assuming it is on the daemon PATH."""
+    candidates = [
+        os.environ.get("ORQELLA_OPENCODE_BIN"),
+        shutil.which("opencode"),
+        os.path.join(HOST_HOME, ".local", "share", "mise", "shims", "opencode"),
+        os.path.join(HOST_HOME, ".local", "bin", "opencode"),
+        "/usr/local/bin/opencode",
+        "/usr/bin/opencode",
+    ]
+    for candidate in candidates:
+        if candidate and os.path.isfile(candidate) and os.access(candidate, os.X_OK):
+            return candidate
+    return None
+
+
+def ensure_service():
+    """Reuse a running OpenCode service, or start the shared one on demand.
+
+    `opencode service start` is idempotent: it returns the existing service
+    URL when one is already running. Starting a second `opencode serve` on the
+    same port is what causes the crash loops this avoids.
+    """
+    global _service_ready_until
+    if CONFIGURED_BASE_URL and CONFIGURED_BASE_URL != DEFAULT_BASE_URL:
+        # An explicit non-default URL is authoritative. Do not start a local
+        # service that the user did not ask for.
+        return
+    if time.monotonic() < _service_ready_until and service_health():
+        return
+    with _service_lock:
+        if service_health():
+            _service_ready_until = time.monotonic() + SERVICE_READY_SECONDS
+            return
+        binary = opencode_binary()
+        if not binary:
+            raise RuntimeError(
+                "OpenCode is not installed or not on PATH. Install OpenCode, "
+                "or set the module's base_url to an existing OpenCode service."
+            )
+        try:
+            result = subprocess.run(
+                [binary, "service", "start"],
+                capture_output=True,
+                text=True,
+                timeout=SERVICE_START_TIMEOUT,
+            )
+        except (OSError, subprocess.SubprocessError) as error:
+            raise RuntimeError(f"could not start the OpenCode service: {error}") from error
+        deadline = time.monotonic() + SERVICE_WAIT_SECONDS
+        while time.monotonic() < deadline:
+            if service_health():
+                _service_ready_until = time.monotonic() + SERVICE_READY_SECONDS
+                return
+            time.sleep(0.5)
+        detail = (result.stderr or result.stdout or "").strip()
+        message = "OpenCode service did not become reachable."
+        if detail:
+            message += f" {detail[-800:]}"
+        else:
+            message += " Try `opencode service restart`."
+        raise RuntimeError(message)
+
+
 def basic_auth():
     service, _path = service_config()
     password = service.get("password") or ""
@@ -71,6 +162,7 @@ def basic_auth():
 
 
 def opencode_api(method, path, body=None, accept=None):
+    ensure_service()
     data = json.dumps(body).encode() if body is not None else None
     headers = {
         "Authorization": "Basic " + basic_auth(),
@@ -214,6 +306,9 @@ class Handler(BaseHTTPRequestHandler):
         try:
             if parsed.path == "/health":
                 return self.send_json(200, {"ok": True})
+            if parsed.path == "/api/service":
+                ensure_service()
+                return self.send_json(200, {"ok": True, "url": service_base_url()})
             if parsed.path == "/api/models":
                 return self.send_json(200, models())
             if parsed.path == "/api/sessions":
