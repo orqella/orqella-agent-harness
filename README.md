@@ -14,7 +14,7 @@ This is a normal Orqella module, not part of the daemon. It demonstrates:
 Install it with:
 
 ```bash
-orqella module install modules/opencode
+orqella module install https://github.com/orqella/orqella-opencode
 ```
 
 Requirements:
