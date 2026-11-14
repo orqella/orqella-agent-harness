@@ -141,6 +141,9 @@ class ApiMappingTests(unittest.TestCase):
         with mock.patch.object(server, "opencode_api", side_effect=fake_api):
             server.sessions({"limit": ["0"]})
         self.assertIn("limit=1", calls[1][1])
+        with mock.patch.object(server, "opencode_api", side_effect=fake_api):
+            server.sessions({"limit": ["not-a-number"]})
+        self.assertIn("limit=25", calls[2][1])
 
     def test_pair_returns_urlsafe_auth_token(self) -> None:
         calls = []

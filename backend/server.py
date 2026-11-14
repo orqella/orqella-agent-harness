@@ -215,7 +215,10 @@ def models():
 
 
 def sessions(query):
-    limit = max(1, min(100, int(query.get("limit", ["25"])[0])))
+    try:
+        limit = max(1, min(100, int(query.get("limit", ["25"])[0])))
+    except (TypeError, ValueError):
+        limit = 25
     parameters = {"limit": limit}
     if query.get("cursor"):
         parameters["cursor"] = query["cursor"][0]
@@ -294,10 +297,18 @@ class Handler(BaseHTTPRequestHandler):
         return False
 
     def read_json(self):
-        length = int(self.headers.get("Content-Length") or 0)
-        if length == 0:
+        try:
+            length = int(self.headers.get("Content-Length") or 0)
+        except ValueError:
+            length = 0
+        if length <= 0:
             return {}
-        return json.loads(self.rfile.read(length) or b"{}")
+        if length > 2 * 1024 * 1024:
+            raise ValueError("request body too large")
+        value = json.loads(self.rfile.read(length) or b"{}")
+        if not isinstance(value, dict):
+            raise ValueError("JSON object required")
+        return value
 
     def do_GET(self):
         if not self.authorized():
