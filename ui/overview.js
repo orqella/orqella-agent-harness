@@ -228,12 +228,15 @@
     if (ctx.config?.show_overview_button === false) $("open").hidden = true;
     feedback("Checking the local service…");
     try {
-      await backend("/api/service");
+      const service = await backend("/api/service");
+      if (!service.running && ctx.config?.auto_start_service === true) {
+        await backend("/api/service/start", "POST", {});
+      }
       status = await window.orqella.call("proxy.status", { mount: "opencode", node: node() });
       $("state").textContent = status.ok ? "live" : "offline";
       $("state").classList.toggle("ok", !!status.ok);
       if (!status.ok) {
-        feedback(status.error || "OpenCode is not reachable", "bad");
+        feedback(status.error || "OpenCode is not running. Use ↗ or start a session to launch it.", "bad");
         setBusy(false);
         return;
       }

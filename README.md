@@ -41,11 +41,18 @@ OpenCode-specific host API. `backend.read_paths` documents the credential
 locations.
 
 If an OpenCode service is already running, the sidecar only forwards to it. If
-it is not running, the sidecar starts the shared background service with
-`opencode service start` and then forwards. That command is idempotent, so it
+it is not running, the module starts the shared background service with
+`opencode service start` when you open the workspace, start a session, or enable
+**Start OpenCode when the overview loads**. That command is idempotent, so it
 never starts a second server on the same port. Setting `base_url` to a
 non-default URL disables the automatic start; the configured service is then
-treated as externally managed.
+treated as externally managed. `base_url` must be loopback: the sidecar never
+sends the local OpenCode service password to a remote host.
+
+The module pairs with OpenCode and puts the resulting service token in the app
+URL query for the handoff; OpenCode removes it after loading. Treat the app URL
+(and browser history) as sensitive until OpenCode has consumed it. Prefer a
+one-time handoff endpoint if a future OpenCode version provides one.
 
 The module works on Linux, macOS, and Windows when OpenCode is installed. The
 sidecar uses Python 3.9+ (with the `python`/`py -3` fallback) and has no

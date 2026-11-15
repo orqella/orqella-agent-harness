@@ -47,6 +47,7 @@ class EnsureServiceTests(unittest.TestCase):
             capture_output=True,
             text=True,
             timeout=server.SERVICE_START_TIMEOUT,
+            env=mock.ANY,
         )
 
     def test_reports_a_missing_binary(self):
@@ -56,6 +57,45 @@ class EnsureServiceTests(unittest.TestCase):
         ):
             with self.assertRaisesRegex(RuntimeError, "not installed"):
                 server.ensure_service()
+
+    def test_invalid_credential_is_surfaced(self):
+        with tempfile.TemporaryDirectory() as temp:
+            old = server.HOST_HOME
+            server.HOST_HOME = temp
+            try:
+                path = Path(temp) / ".config" / "opencode" / "service.json"
+                path.parent.mkdir(parents=True)
+                path.write_text("{not json", encoding="utf-8")
+                with self.assertRaises(server.ServiceCredentialInvalid):
+                    server.service_health()
+                status = server.service_status()
+                self.assertFalse(status["ok"])
+                self.assertIn("could not read", status["error"])
+            finally:
+                server.HOST_HOME = old
+
+    def test_service_status_reports_a_missing_credential(self):
+        with tempfile.TemporaryDirectory() as temp:
+            old = server.HOST_HOME
+            server.HOST_HOME = temp
+            try:
+                status = server.service_status()
+                self.assertTrue(status["ok"])
+                self.assertFalse(status["running"])
+                self.assertIn("credential not found", status["error"])
+            finally:
+                server.HOST_HOME = old
+
+    def test_sanitized_env_removes_module_credentials(self):
+        with mock.patch.dict(
+            os.environ,
+            {"ORQELLA_MODULE_TOKEN": "secret", "ORQELLA_MODULE_CONFIG": "{}", "KEEP": "yes"},
+            clear=False,
+        ):
+            env = server.sanitized_env()
+        self.assertNotIn("ORQELLA_MODULE_TOKEN", env)
+        self.assertNotIn("ORQELLA_MODULE_CONFIG", env)
+        self.assertEqual(env.get("KEEP"), "yes")
 
 
 class ApiMappingTests(unittest.TestCase):

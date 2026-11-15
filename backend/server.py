@@ -10,6 +10,7 @@ import json
 import os
 import shutil
 import subprocess
+import sys
 import threading
 import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -25,8 +26,24 @@ CONFIGURED_BASE_URL = (CONFIG.get("base_url") or "").rstrip("/")
 SERVICE_START_TIMEOUT = 20
 SERVICE_WAIT_SECONDS = 15
 SERVICE_READY_SECONDS = 10
+MODELS_TTL = 5
 _service_lock = threading.Lock()
 _service_ready_until = 0.0
+_models_cache: dict[str, object] = {"at": 0.0, "value": None}
+
+
+class ServiceCredentialMissing(RuntimeError):
+    """The OpenCode service has not created service.json yet."""
+
+
+class ServiceCredentialInvalid(RuntimeError):
+    """service.json exists but cannot be read or parsed."""
+
+
+class RequestError(Exception):
+    def __init__(self, status: int, message: str):
+        super().__init__(message)
+        self.status = status
 
 
 def service_candidates():
@@ -39,10 +56,16 @@ def service_candidates():
     names = [
         (".config", "opencode", "service.json"),
         (".local", "state", "opencode", "service.json"),
-        ("Library", "Application Support", "opencode", "service.json"),
-        ("AppData", "Roaming", "opencode", "service.json"),
-        ("AppData", "Local", "opencode", "service.json"),
     ]
+    if sys.platform == "darwin":
+        names.append(("Library", "Application Support", "opencode", "service.json"))
+    if os.name == "nt":
+        names.extend(
+            [
+                ("AppData", "Roaming", "opencode", "service.json"),
+                ("AppData", "Local", "opencode", "service.json"),
+            ]
+        )
     return [os.path.join(HOST_HOME, *parts) for parts in names]
 
 
@@ -56,8 +79,10 @@ def service_config():
         except FileNotFoundError:
             continue
         except (OSError, ValueError) as error:
-            raise RuntimeError(f"could not read OpenCode service credential at {path}: {error}") from error
-    raise RuntimeError(
+            raise ServiceCredentialInvalid(
+                f"could not read OpenCode service credential at {path}: {error}"
+            ) from error
+    raise ServiceCredentialMissing(
         "OpenCode service credential not found. Run `opencode service start` "
         "(or start OpenCode once) so service.json is created, then retry."
     )
@@ -97,8 +122,31 @@ def service_health():
         )
         with urlopen(request, timeout=2) as response:
             return 200 <= response.status < 300
+    except ServiceCredentialInvalid:
+        raise
     except Exception:
         return False
+
+
+def service_status():
+    if not configured_base_is_local():
+        return {
+            "ok": False,
+            "running": False,
+            "url": CONFIGURED_BASE_URL,
+            "error": "OpenCode base_url must be loopback; local credentials are never sent to a remote host.",
+        }
+    try:
+        return {
+            "ok": True,
+            "running": service_health(),
+            "url": service_base_url(),
+            "error": "",
+        }
+    except ServiceCredentialInvalid as error:
+        return {"ok": False, "running": False, "url": DEFAULT_BASE_URL, "error": str(error)}
+    except ServiceCredentialMissing as error:
+        return {"ok": True, "running": False, "url": DEFAULT_BASE_URL, "error": str(error)}
 
 
 def opencode_binary():
@@ -115,6 +163,14 @@ def opencode_binary():
         if candidate and os.path.isfile(candidate) and os.access(candidate, os.X_OK):
             return candidate
     return None
+
+
+def sanitized_env():
+    env = os.environ.copy()
+    for key in ("ORQELLA_MODULE_TOKEN", "ORQELLA_MODULE_CONFIG"):
+        env.pop(key, None)
+    env["HOME"] = HOST_HOME
+    return env
 
 
 def ensure_service():
@@ -147,6 +203,7 @@ def ensure_service():
                 capture_output=True,
                 text=True,
                 timeout=SERVICE_START_TIMEOUT,
+                env=sanitized_env(),
             )
         except (OSError, subprocess.SubprocessError) as error:
             raise RuntimeError(f"could not start the OpenCode service: {error}") from error
@@ -213,11 +270,15 @@ def public_model(model):
     }
 
 
-def models():
+def models(force: bool = False):
+    current = time.monotonic()
+    cached = _models_cache["value"]
+    if not force and cached and current - float(_models_cache["at"]) < MODELS_TTL:
+        return cached
     available = opencode_api("GET", "/api/model").get("data", [])
     default = opencode_api("GET", "/api/model/default").get("data")
     providers = opencode_api("GET", "/api/provider").get("data", [])
-    return {
+    value = {
         "models": [public_model(model) for model in available if model.get("enabled", True)],
         "default": public_model(default) if isinstance(default, dict) else None,
         "providers": [
@@ -226,6 +287,9 @@ def models():
             if provider.get("id")
         ],
     }
+    _models_cache["at"] = current
+    _models_cache["value"] = value
+    return value
 
 
 def sessions(query):
@@ -293,6 +357,8 @@ def launch(payload):
 
 
 class Handler(BaseHTTPRequestHandler):
+    server_version = "OrqellaOpenCode/1"
+
     def log_message(self, *args):
         pass
 
@@ -301,6 +367,8 @@ class Handler(BaseHTTPRequestHandler):
         self.send_response(status)
         self.send_header("Content-Type", "application/json")
         self.send_header("Content-Length", str(len(data)))
+        self.send_header("Cache-Control", "no-store")
+        self.send_header("X-Content-Type-Options", "nosniff")
         self.end_headers()
         self.wfile.write(data)
 
@@ -319,10 +387,13 @@ class Handler(BaseHTTPRequestHandler):
         if length <= 0:
             return {}
         if length > 2 * 1024 * 1024:
-            raise ValueError("request body too large")
-        value = json.loads(self.rfile.read(length) or b"{}")
+            raise RequestError(413, "request body too large")
+        try:
+            value = json.loads(self.rfile.read(length) or b"{}")
+        except (json.JSONDecodeError, UnicodeDecodeError) as error:
+            raise RequestError(400, "invalid JSON") from error
         if not isinstance(value, dict):
-            raise ValueError("JSON object required")
+            raise RequestError(400, "JSON object required")
         return value
 
     def do_GET(self):
@@ -333,28 +404,40 @@ class Handler(BaseHTTPRequestHandler):
             if parsed.path == "/health":
                 return self.send_json(200, {"ok": True})
             if parsed.path == "/api/service":
-                ensure_service()
-                return self.send_json(200, {"ok": True, "url": service_base_url()})
+                return self.send_json(200, service_status())
             if parsed.path == "/api/models":
                 return self.send_json(200, models())
             if parsed.path == "/api/sessions":
                 return self.send_json(200, sessions(parse_qs(parsed.query)))
             return self.send_json(404, {"error": "not found"})
-        except Exception as error:
+        except RequestError as error:
+            return self.send_json(error.status, {"error": str(error)})
+        except (RuntimeError, OSError) as error:
             return self.send_json(502, {"error": str(error)})
+        except Exception as error:  # noqa: BLE001 - API boundary
+            return self.send_json(500, {"error": str(error)})
 
     def do_POST(self):
         if not self.authorized():
             return
         parsed = urlparse(self.path)
         try:
+            if parsed.path == "/api/service/start":
+                ensure_service()
+                return self.send_json(200, service_status())
             if parsed.path == "/api/launch":
                 return self.send_json(200, launch(self.read_json()))
             if parsed.path == "/api/pair":
                 return self.send_json(200, pair())
             return self.send_json(404, {"error": "not found"})
-        except Exception as error:
+        except RequestError as error:
+            return self.send_json(error.status, {"error": str(error)})
+        except ValueError as error:
+            return self.send_json(400, {"error": str(error)})
+        except (RuntimeError, OSError) as error:
             return self.send_json(502, {"error": str(error)})
+        except Exception as error:  # noqa: BLE001 - API boundary
+            return self.send_json(500, {"error": str(error)})
 
 
 if __name__ == "__main__":

@@ -41,7 +41,7 @@
     $("title").textContent = "Opening workspace…";
     $("detail").textContent = `Connecting to ${context.node?.name || "this machine"}.`;
     try {
-      await backend("/api/service");
+      await backend("/api/service/start", "POST", {});
       const status = await window.orqella.call("proxy.status", { mount: "opencode", node: context.node?.id || "local" });
       if (!status.ok) {
         showError("OpenCode is not reachable", status.error || "No service is listening.");

@@ -1,7 +1,7 @@
 schema = 1
 id = "opencode"
 name = "OpenCode"
-version = "0.2.6"
+version = "0.2.7"
 api_version = "1"
 description = "An installable OpenCode workspace module."
 entry = "ui/index.html"
@@ -42,3 +42,10 @@ key = "show_overview_button"
 type = "boolean"
 label = "Show open button in overview"
 default = true
+
+[[config.fields]]
+key = "auto_start_service"
+type = "boolean"
+label = "Start OpenCode when the overview loads"
+default = false
+help = "When disabled, OpenCode starts only when you open the workspace or start a session."
