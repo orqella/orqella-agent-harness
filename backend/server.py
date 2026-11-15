@@ -5,6 +5,7 @@ service credential and talks to the HTTP API directly, so this module needs no
 OpenCode-specific host routes in Orqella.
 """
 import base64
+import hmac
 import json
 import os
 import shutil
@@ -73,8 +74,17 @@ def service_base_url():
     return f"http://127.0.0.1:{port}"
 
 
+def configured_base_is_local():
+    if not CONFIGURED_BASE_URL or CONFIGURED_BASE_URL == DEFAULT_BASE_URL:
+        return True
+    host = (urlparse(CONFIGURED_BASE_URL).hostname or "").lower()
+    return host in {"127.0.0.1", "localhost", "::1"}
+
+
 def service_health():
     """Return true when the configured service answers with its credential."""
+    if not configured_base_is_local():
+        return False
     try:
         service, _path = service_config()
         password = service.get("password") or ""
@@ -156,6 +166,10 @@ def ensure_service():
 
 
 def basic_auth():
+    if not configured_base_is_local():
+        raise RuntimeError(
+            "refusing to send the local OpenCode service password to a non-loopback base_url"
+        )
     service, _path = service_config()
     password = service.get("password") or ""
     return base64.b64encode(f"opencode:{password}".encode()).decode()
@@ -291,7 +305,8 @@ class Handler(BaseHTTPRequestHandler):
         self.wfile.write(data)
 
     def authorized(self):
-        if self.headers.get("X-Orqella-Module-Token") == TOKEN:
+        supplied = self.headers.get("X-Orqella-Module-Token") or ""
+        if TOKEN and hmac.compare_digest(supplied, TOKEN):
             return True
         self.send_json(401, {"error": "unauthorized"})
         return False
