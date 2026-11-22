@@ -1,22 +1,66 @@
-# OpenCode module
+# Agent Harness module
 
-An Orqella module that opens the local OpenCode service as an app surface and
-offers a small overview launcher.
+One Orqella module that hosts coding-agent harnesses. OpenCode, Claude Code,
+Codex, Gemini, and other ACP agents all render in the same conversation UI;
+arbitrary commands can run as one-shot `exec` harnesses. OpenCode additionally
+keeps a native-workspace action for features the module does not mirror.
 
-- `backend/server.py` reads OpenCode's managed-service credential, forwards to
-  its HTTP API, and pairs the app surface. It never owns OpenCode credentials
-  beyond that file.
-- Use `ORQELLA_HOST_HOME` for host paths; `HOME` is the module home.
-- `GET /api/service` is read-only. `POST /api/service/start` is the explicit
-  start action; do not start OpenCode just because the overview mounted unless
-  the `auto_start_service` setting is enabled.
-- Surface `ServiceCredentialInvalid` separately from a missing service. Do not
-  swallow malformed `service.json`.
-- The paired auth token is passed in the app URL because that is the current
-  OpenCode handoff contract. Treat it as sensitive and prefer a one-time
-  handoff if OpenCode adds one.
-- `base_url` must be loopback; never send the local service password elsewhere.
-- Strip `ORQELLA_MODULE_TOKEN`/`ORQELLA_MODULE_CONFIG` from child processes.
-- Load `/assets/theme.css` and `/assets/module.css`; use core primitives.
-- Add backend tests under `backend/test_server.py`; run it and
-  `orqella module check .` before publishing.
+## Layout
+
+- `backend/server.py` — loopback HTTP API and WebSocket event stream.
+- `backend/registry.py` — built-in harness definitions, validation, probing.
+- `backend/sessions.py` — session index, transcripts, normalized events, the
+  ACP host implementation (permissions, filesystem, terminals), and the `exec`
+  driver.
+- `backend/acp.py` — ACP v1 client (JSON-RPC over stdio), process lifecycle, and
+  terminal management.
+- `backend/opencode.py` — the OpenCode native-workspace helper (service URL and
+  pairing token only). OpenCode sessions run through the ACP driver.
+- `ui/index.html` + `app.js` — conversation workspace.
+- `ui/overview.html` + `overview.js` — harness switcher, prompt launcher, recent
+  sessions.
+- `ui/settings.html` + `settings.js` — agent registry editor, embedded in Settings → Agents.
+
+## Contracts
+
+- Use `ORQELLA_HOST_HOME` for host paths; `HOME` is the module home. Strip
+  `ORQELLA_*` variables from every child process.
+- Harnesses use their own login and configuration. The module never stores API
+  keys or service passwords. OpenCode's pairing token is a URL handoff and is
+  treated as sensitive.
+- ACP filesystem and terminal delegation is opt-in per harness in settings.
+  Paths are confined to the session root set, terminal environments are
+  sanitized, output is capped, and every command and write is appended to
+  `data/audit.jsonl`.
+- Discovery is read-only. `POST /api/opencode/service/start` and
+  `POST /api/sessions` are explicit actions.
+- `GET /api/opencode/service` and `GET /api/harnesses` must never start a
+  process.
+- Module WebSocket URLs are relative to the page so the same code works on a
+  remote node (`/n/<node>/m/agent-harness/ws/...`).
+- Overview cards open the full workspace through the `module.open` host API.
+- Existing harness history is discovered through ACP `session/list` and adopted
+  on demand. Adopting registers the local row before `session/load` so replayed
+  history has a transcript to land in. Never scan harness-specific storage.
+- Delete calls ACP `session/delete` when advertised, removes the local record and
+  transcript, and records a tombstone in `data/hidden_sessions.json` so a cached
+  `session/list` cannot resurrect the conversation. Deleting history directly
+  uses the same tombstone/native-delete path.
+- Thoughts/tools visibility is a client-side view toggle; do not remove events
+  from the transcript for it.
+- Historical `status` events are not authoritative. Skip them during transcript
+  replay; the session row/WS `ready` event and native activity hint drive the
+  header.
+- Opening a session may refresh history from the harness when its activity is
+  newer than the stored transcript. The refresh endpoint preserves a backup and
+  restores it if the harness does not replay.
+
+## Tests
+
+```bash
+python3 -m unittest discover -s backend -p 'test_*.py'
+orqella module check .
+```
+
+Add backend tests under `backend/test_*.py`; the mock ACP agent lives at
+`backend/tests/mock_acp_agent.py`. Run both commands before publishing.

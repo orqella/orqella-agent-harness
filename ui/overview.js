@@ -1,123 +1,227 @@
 (() => {
+  const H = window.Harness;
   const $ = (id) => document.getElementById(id);
-  let context = { node: { id: "local", name: "local" }, config: {} };
-  let status = null;
-  let models = [];
-  let sessionsCursor = null;
-  let sessionsDone = false;
-  let sessionsLoading = false;
+  const node = () => context?.node?.id || "local";
+
+  let context = null;
+  let registry = { harnesses: [], default: "" };
+  let harnesses = [];
+  let selected = "";
+  let cwd = "";
+  let busy = false;
+
+  const backend = (path, method = "GET", body) => H.backend(path, method, body);
+  const harness = (id) => harnesses.find((entry) => entry.id === id) || registry.harnesses.find((entry) => entry.id === id) || { id, label: id };
+  const storage = {
+    async get(key) {
+      try { return await window.orqella.call("storage.get", { key }); } catch { return null; }
+    },
+    async set(key, value) {
+      try { await window.orqella.call("storage.set", { key, value }); } catch {}
+    },
+  };
 
   const feedback = (text, kind = "") => {
-    $("feedback").textContent = text || "";
-    $("feedback").className = `feedback ${kind}`;
+    const element = $("feedback");
+    element.textContent = text || "";
+    element.className = `feedback ${kind}`;
+    element.hidden = !text;
   };
-  const setBusy = (busy) => {
-    $("start").disabled = busy || !status?.ok || !models.length;
-    $("prompt").disabled = busy || !status?.ok;
-    $("model").disabled = busy || !status?.ok || !models.length;
+  const setState = (text, kind = "") => {
+    $("state").textContent = text;
+    $("state").className = `state ${kind}`;
   };
-  const base64url = (value) => btoa(value).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
-  const sessionPath = (id) => {
-    const origin = new URL(status?.url || location.href).origin;
-    return `/server/${base64url(origin)}/session/${encodeURIComponent(id)}`;
+  const setBusy = (value) => {
+    busy = value;
+    const entry = harnesses.find((item) => item.id === selected) || {};
+    const ready = entry.installed !== false && entry.enabled !== false;
+    $("start").disabled = value || !ready;
+    $("prompt").disabled = value;
+    $("harness").disabled = value;
   };
-  const node = () => context.node?.id || "local";
-  const backend = (path, method = "GET", body) => window.orqella.call("backend.request", {
-    method,
-    path,
-    ...(body !== undefined ? { body } : {}),
-  });
 
-  async function openWithPair(path) {
-    const pair = await backend("/api/pair", "POST", {});
-    if (!pair?.auth_token) throw new Error("Could not authenticate with OpenCode");
-    const target = path || "/";
-    const separator = target.includes("?") ? "&" : "?";
-    return window.orqella.call("app.open", {
-      mount: "opencode",
-      node: node(),
-      path: `${target}${separator}auth_token=${encodeURIComponent(pair.auth_token)}`,
-    });
+  function updateNativeButton() {
+    $("native").hidden = !selectedEntry().web?.mount;
+  }
+
+  function renderHarnessSelect() {
+    const choices = registry.harnesses.filter((entry) => entry.enabled !== false);
+    $("harness").innerHTML = choices.map((entry) => {
+      const state = harnesses.find((item) => item.id === entry.id) || {};
+      const suffix = state.installed === false ? " · not installed" : state.running ? " · live" : "";
+      return `<option value="${H.escapeHtml(entry.id)}">${H.escapeHtml(entry.label + suffix)}</option>`;
+    }).join("");
+    $("harness").value = selected;
+    updateNativeButton();
+  }
+
+  function selectedEntry() {
+    return harnesses.find((entry) => entry.id === selected) || { id: selected, label: selected };
+  }
+
+  async function refreshState() {
+    const entry = selectedEntry();
+    setState(entry.installed === false ? "not installed" : entry.running ? "live" : "ready", entry.installed === false ? "bad" : entry.running ? "ok" : "");
+    feedback(
+      entry.installed === false
+        ? entry.error || "Install this harness on the selected machine."
+        : "",
+      entry.installed === false ? "bad" : "",
+    );
+    await loadCwd();
+    updateNativeButton();
+    setBusy(false);
+  }
+
+  async function loadCwd() {
+    if (cwd) {
+      $("cwdValue").textContent = cwd;
+      $("cwdValue").title = cwd;
+      return;
+    }
+    const remembered = await storage.get("last_cwd");
+    if (remembered?.path) {
+      cwd = remembered.path;
+      $("cwdValue").textContent = cwd;
+      $("cwdValue").title = cwd;
+      return;
+    }
+    $("cwdValue").textContent = "Choose a folder";
+    $("cwdValue").title = "Workspace folder";
+  }
+
+  async function chooseCwd() {
+    try {
+      const result = await window.orqella.call("system.pick_directory", {
+        node: node(),
+        title: "Choose a workspace folder",
+        start: cwd || "",
+      });
+      if (result?.path) {
+        cwd = result.path;
+        $("cwdValue").textContent = cwd;
+        $("cwdValue").title = cwd;
+        await storage.set("last_cwd", { path: cwd });
+        return;
+      }
+      if (result?.cancelled) return;
+    } catch {}
+    // Older shells have no picker; hand off to the full workspace, which has
+    // its own directory browser.
+    await window.orqella.call("module.open", { path: `/?harness=${encodeURIComponent(selected)}` });
+  }
+
+  async function loadSessions(reset = false, includeHistory = false) {
+    if (reset) $("sessionList").innerHTML = "";
+    $("sessionMore").textContent = "Loading…";
+    try {
+      const result = await backend("/api/sessions?limit=12");
+      const local = result.sessions || [];
+      const rows = local.slice();
+      if (includeHistory) {
+        const targets = harnesses.filter((entry) => entry.kind === "acp" && entry.enabled !== false && entry.installed !== false);
+        const found = await Promise.allSettled(targets.map((entry) => backend(`/api/sessions/discover?harness=${encodeURIComponent(entry.id)}`)));
+        const indexed = new Set(local.map((session) => `${session.harness}:${session.harness_session_id}`));
+        for (const item of found) {
+          if (item.status !== "fulfilled") continue;
+          for (const session of item.value.sessions || []) {
+            const key = `${session.harness}:${session.session_id}`;
+            if (indexed.has(key)) continue;
+            indexed.add(key);
+            rows.push({ ...session, discovered: true, updated_at: session.updated_at });
+          }
+        }
+      }
+      rows.sort((left, right) => String(right.updated_at || "").localeCompare(String(left.updated_at || "")));
+      const visible = rows.slice(0, 8);
+      $("sessionList").innerHTML = visible.length
+        ? visible.map((row) => {
+            const attributes = row.discovered
+              ? `data-history="1" data-harness="${H.escapeHtml(row.harness)}" data-harness-session="${H.escapeHtml(row.session_id)}" data-cwd="${H.escapeHtml(row.cwd || "")}" data-title="${H.escapeHtml(row.title || "")}"`
+              : `data-session="${H.escapeHtml(row.id)}"`;
+            const chip = row.discovered ? `<span class="chip">history</span>` : "";
+            return `<button class="session-item" type="button" ${attributes}><b>${H.escapeHtml(row.title || "Untitled")}</b><small>${H.escapeHtml(harness(row.harness).label)}${row.updated_at ? " · " + H.escapeHtml(H.fmtWhen(row.updated_at)) : ""} ${chip}</small></button>`;
+          }).join("")
+        : `<div class="session-more">No sessions yet.</div>`;
+      $("sessionList").querySelectorAll("[data-session], [data-history]").forEach((button) => {
+        button.onclick = () => {
+          if (button.dataset.history) {
+            return openHistory(button.dataset.harness, button.dataset.harnessSession, button.dataset.cwd, button.dataset.title);
+          }
+          return openSession(button.dataset.session);
+        };
+      });
+      $("sessionMore").textContent = rows.length > visible.length ? `${rows.length - visible.length} earlier sessions in the workspace` : "No earlier sessions";
+    } catch (error) {
+      $("sessionMore").textContent = error.message || "Could not load sessions";
+    }
   }
 
   async function openSession(id) {
+    await window.orqella.call("module.open", { path: `/?session=${encodeURIComponent(id)}` });
+  }
+
+  async function openHistory(harnessId, harnessSessionId, cwd, title) {
     try {
-      await openWithPair(sessionPath(id));
-      closeSessions();
-      feedback("Opening session…", "ok");
+      $("sessionMore").textContent = "Opening session…";
+      const adopted = await backend("/api/sessions/adopt", "POST", {
+        harness: harnessId,
+        session_id: harnessSessionId,
+        cwd: cwd || "",
+        title: title || "",
+      });
+      await window.orqella.call("module.open", { path: `/?session=${encodeURIComponent(adopted.id)}` });
     } catch (error) {
-      feedback(error.message || "Could not open session", "bad");
+      feedback(error.message || "Could not open the session", "bad");
     }
   }
 
-  async function loadModels() {
+  async function openNative() {
+    const entry = selectedEntry();
+    const web = entry.web;
+    if (!web?.mount) return feedback("This harness has no web workspace.", "bad");
     try {
-      const data = await backend("/api/models");
-      const providers = new Map((data.providers || []).map((provider) => [provider.id, provider.name]));
-      models = (data.models || [])
-        .filter((model) => model.enabled !== false && (model.status === undefined || model.status === "active"))
-        .sort((a, b) => {
-          const pa = providers.get(a.providerID) || a.providerID || "";
-          const pb = providers.get(b.providerID) || b.providerID || "";
-          return pa.localeCompare(pb) || String(a.name || a.id).localeCompare(String(b.name || b.id));
-        });
-      const select = $("model");
-      select.innerHTML = models.length
-        ? models.map((model, index) => `<option value="${index}">${escapeHtml(providers.get(model.providerID) || model.providerID || "Model")} · ${escapeHtml(model.name || model.id)}</option>`).join("")
-        : `<option>No models</option>`;
-      let selected = -1;
-      try {
-        const remembered = await window.orqella.call("storage.get", { key: "overview_model" });
-        const modelID = remembered?.modelID || remembered?.id;
-        if (remembered?.providerID && modelID) {
-          selected = models.findIndex((model) => model.providerID === remembered.providerID
-            && (model.modelID || model.id) === modelID);
-        }
-      } catch {}
-      if (selected < 0 && data.default) {
-        selected = models.findIndex((model) => model.providerID === data.default.providerID
-          && (model.modelID || model.id) === (data.default.modelID || data.default.id));
+      let status = await backend(`/api/native/status?harness=${encodeURIComponent(entry.id)}`);
+      if (!status.available) throw new Error(status.error || "No web workspace is configured.");
+      if (!status.running) status = await backend("/api/native/start", "POST", { harness: entry.id });
+      if (!status.running && status.error) throw new Error(status.error);
+      let token = "";
+      if (web.handoff) {
+        const pair = await backend("/api/native/pair", "POST", { harness: entry.id });
+        token = pair?.auth_token || "";
       }
-      if (selected >= 0) select.value = String(selected);
-      setBusy(false);
+      const path = token ? `/?auth_token=${encodeURIComponent(token)}` : "/";
+      await window.orqella.call("app.open", { mount: web.mount, node: node(), path });
     } catch (error) {
-      setBusy(false);
-      feedback(error.message || "Models unavailable", "bad");
+      feedback(error.message || "Could not open the native workspace", "bad");
     }
   }
 
-  async function loadSessions(reset = false) {
-    if (sessionsLoading || (sessionsDone && !reset)) return;
-    if (reset) {
-      sessionsCursor = null;
-      sessionsDone = false;
-      $("sessionList").innerHTML = "";
+  async function openWorkspace() {
+    const query = `/?harness=${encodeURIComponent(selected)}${cwd ? `&cwd=${encodeURIComponent(cwd)}` : ""}`;
+    await window.orqella.call("module.open", { path: query });
+  }
+
+  async function startSession(event) {
+    event.preventDefault();
+    if (busy) return;
+    const prompt = $("prompt").value.trim();
+    if (!prompt) {
+      $("prompt").focus();
+      return feedback("Write a prompt first.", "bad");
     }
-    sessionsLoading = true;
-    $("sessionMore").textContent = "Loading…";
+    if (!cwd) return feedback("Choose a workspace folder first.", "bad");
+    setBusy(true);
+    feedback("Starting a session…", "ok");
     try {
-      const query = new URLSearchParams({ limit: "25" });
-      if (sessionsCursor) query.set("cursor", sessionsCursor);
-      const result = await backend(`/api/sessions?${query}`);
-      const sessions = result?.data || [];
-      if (!sessions.length && !sessionsCursor) {
-        $("sessionList").innerHTML = `<div class="session-more">No sessions yet.</div>`;
-      } else {
-        const rows = sessions.map((session) => {
-          const updated = session.time?.updated || session.time?.created;
-          const when = updated ? new Date(updated).toLocaleDateString(undefined, { month: "short", day: "numeric" }) : "";
-          const detail = [when, session.agent, session.model?.id].filter(Boolean).join(" · ");
-          return `<button class="session-item" type="button" data-session="${escapeHtml(session.id)}"><b>${escapeHtml(session.title || "Untitled session")}</b><small>${escapeHtml(detail)}</small></button>`;
-        }).join("");
-        $("sessionList").insertAdjacentHTML("beforeend", rows);
-      }
-      sessionsCursor = result?.cursor?.next || null;
-      sessionsDone = !sessionsCursor;
-      $("sessionMore").textContent = sessionsDone ? "No earlier sessions" : "Scroll for earlier sessions";
+      const created = await backend("/api/sessions", "POST", { harness: selected, cwd });
+      await backend(`/api/sessions/${encodeURIComponent(created.id)}/prompt`, "POST", { text: prompt });
+      $("prompt").value = "";
+      await window.orqella.call("module.open", { path: `/?session=${encodeURIComponent(created.id)}` });
     } catch (error) {
-      $("sessionMore").textContent = error.message || "Could not load sessions";
+      feedback(error.message || "Could not start the session", "bad");
     } finally {
-      sessionsLoading = false;
+      setBusy(false);
     }
   }
 
@@ -127,125 +231,59 @@
     $("sessionsChevron").textContent = "▾";
   }
 
-  function fitSessionMenu() {
-    const menu = $("sessionMenu");
-    if (menu.hidden) return;
-    const toggle = $("sessionsToggle");
-    const rect = toggle.getBoundingClientRect();
-    const above = Math.floor(rect.top - 8);
-    const below = Math.floor(window.innerHeight - rect.bottom - 8);
-    const openBelow = above < 96 && below > above;
-    if (openBelow) {
-      menu.style.top = "calc(100% + 5px)";
-      menu.style.bottom = "auto";
-      menu.style.maxHeight = `${Math.max(48, Math.min(180, below))}px`;
-    } else {
-      menu.style.top = "auto";
-      menu.style.bottom = "calc(100% + 5px)";
-      menu.style.maxHeight = `${Math.max(48, Math.min(180, above))}px`;
-    }
-  }
-
   async function toggleSessions() {
     const menu = $("sessionMenu");
     if (!menu.hidden) return closeSessions();
     menu.hidden = false;
     $("sessionsToggle").setAttribute("aria-expanded", "true");
     $("sessionsChevron").textContent = "▴";
-    fitSessionMenu();
-    await loadSessions(true);
-    fitSessionMenu();
+    await loadSessions(true, true);
   }
 
-  function escapeHtml(value) {
-    return String(value ?? "").replace(/[&<>"']/g, (character) => ({
-      "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;",
-    }[character]));
-  }
-
-  $("sessionsToggle").addEventListener("click", (event) => { event.stopPropagation(); toggleSessions(); });
-  window.addEventListener("resize", fitSessionMenu);
-  $("sessionMenu").addEventListener("click", (event) => {
-    event.stopPropagation();
-    const item = event.target.closest("[data-session]");
-    if (item) openSession(item.dataset.session);
-  });
-  $("sessionMenu").addEventListener("scroll", () => {
-    const menu = $("sessionMenu");
-    if (menu.scrollTop + menu.clientHeight >= menu.scrollHeight - 24) loadSessions(false);
-  });
-  document.addEventListener("click", (event) => {
-    if (!$("sessionMenu").contains(event.target) && event.target !== $("sessionsToggle")) closeSessions();
-  });
-
-  $("open").addEventListener("click", async () => {
-    try { await openWithPair(""); } catch (error) { feedback(error.message || "Could not open workspace", "bad"); }
-  });
-
-  $("launch").addEventListener("submit", async (event) => {
-    event.preventDefault();
-    const prompt = $("prompt").value.trim();
-    if (!prompt) { $("prompt").focus(); return feedback("Write a prompt first.", "bad"); }
-    const model = models[Number($("model").value)];
-    if (!model) return feedback("Choose a model first.", "bad");
-    setBusy(true);
-    feedback("Starting a new session…", "ok");
-    try {
-      const result = await backend("/api/launch", "POST", {
-        prompt,
-        model: {
-          id: model.modelID || model.id,
-          providerID: model.providerID,
-        },
-      });
-      const id = result?.session?.id;
-      if (!id) throw new Error("OpenCode did not return a session");
-      $("prompt").value = "";
-      await openSession(id);
-    } catch (error) {
-      feedback(error.message || "Could not start session", "bad");
+  function wire() {
+    $("harness").onchange = async () => {
+      selected = $("harness").value;
+      await storage.set("overview_harness", selected);
+      cwd = "";
       setBusy(false);
-    }
-  });
-
-  $("model").addEventListener("change", async () => {
-    const model = models[Number($("model").value)];
-    if (!model) return;
-    try {
-      await window.orqella.call("storage.set", {
-        key: "overview_model",
-        value: { providerID: model.providerID, modelID: model.modelID || model.id },
-      });
-    } catch {}
-  });
-
-  $("prompt").addEventListener("keydown", (event) => {
-    if (event.key === "Enter" && (event.ctrlKey || event.metaKey)) $("launch").requestSubmit();
-  });
+      setState("checking");
+      await refreshState();
+      await loadSessions(true);
+    };
+    $("open").onclick = () => openWorkspace();
+    $("native").onclick = () => openNative();
+    $("chooseCwd").onclick = () => chooseCwd();
+    $("launch").onsubmit = startSession;
+    $("prompt").addEventListener("keydown", (event) => {
+      if (event.key === "Enter" && (event.ctrlKey || event.metaKey)) {
+        event.preventDefault();
+        $("launch").requestSubmit();
+      }
+    });
+    $("sessionsToggle").onclick = (event) => { event.stopPropagation(); toggleSessions(); };
+    $("sessionMenu").addEventListener("click", (event) => event.stopPropagation());
+    document.addEventListener("click", () => closeSessions());
+  }
 
   window.orqella.ready(async (ctx) => {
     context = ctx;
     if (ctx.config?.show_overview_button === false) $("open").hidden = true;
-    feedback("Checking the local service…");
+    wire();
     try {
-      const service = await backend("/api/service");
-      if (!service.running && ctx.config?.auto_start_service === true) {
-        await backend("/api/service/start", "POST", {});
+      registry = await backend("/api/registry");
+      const state = await backend("/api/harnesses");
+      harnesses = state.harnesses || [];
+      const remembered = await storage.get("overview_harness");
+      selected = remembered?.id || registry.default || ctx.config?.default_harness || registry.harnesses[0]?.id || "opencode";
+      if (!registry.harnesses.some((entry) => entry.id === selected && entry.enabled !== false)) {
+        selected = registry.harnesses.find((entry) => entry.enabled !== false)?.id || "opencode";
       }
-      status = await window.orqella.call("proxy.status", { mount: "opencode", node: node() });
-      $("state").textContent = status.ok ? "live" : "offline";
-      $("state").classList.toggle("ok", !!status.ok);
-      if (!status.ok) {
-        feedback(status.error || "OpenCode is not running. Use ↗ or start a session to launch it.", "bad");
-        setBusy(false);
-        return;
-      }
-      await loadModels();
-      feedback(context.config?.show_connection_details === false ? "Ready." : "Ready · " + (status.url || ""));
+      renderHarnessSelect();
+      await refreshState();
+      await loadSessions(true);
     } catch (error) {
-      $("state").textContent = "offline";
-      $("state").classList.remove("ok");
-      feedback(error.message || "OpenCode is unavailable", "bad");
+      feedback(error.message || "Agent Harness is unavailable", "bad");
+      setState("error", "bad");
       setBusy(false);
     }
   });

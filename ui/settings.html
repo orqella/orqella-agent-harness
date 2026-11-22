@@ -1,0 +1,50 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>Agent registry</title>
+  <link rel="stylesheet" href="/assets/theme.css">
+  <link rel="stylesheet" href="/assets/module.css">
+  <link rel="stylesheet" href="style.css">
+  <link rel="stylesheet" href="settings.css">
+</head>
+<body>
+  <main class="settings">
+    <header class="settings-head">
+      <div>
+        <p class="eyebrow">Agents</p>
+        <h1>Agent registry</h1>
+        <p class="small muted">Define the agents available in the workspace. Agents use their own login and configuration; credentials are never stored here. The default for new conversations is set in Settings → Agents.</p>
+      </div>
+      <div class="row"><button class="button ghost small-button" id="reload" type="button">Reload</button><button class="button small-button" id="save" type="button">Save registry</button></div>
+    </header>
+
+    <div class="settings-grid">
+      <article class="card flat">
+        <div class="row spread"><h2>Adapter fallback</h2><span class="small muted">npx</span></div>
+        <p class="small muted" style="margin:8px 0 0">Enable <b>Allow adapter fallback</b> in Settings → Agents → Workspace to run a harness's documented npx adapter when its binary is not on PATH. Requires Node and network access on this machine.</p>
+      </article>
+    </div>
+
+    <div id="harnessList" class="stack"></div>
+
+    <article class="card flat">
+      <div class="row spread"><h2>Add a custom harness</h2><span class="small muted">exec</span></div>
+      <p class="small muted" style="margin:8px 0 12px">A custom harness runs a command once per prompt. Use <span class="mono">{prompt}</span> in an argument, or the prompt is appended. JSON output is scanned for <span class="mono">session_id</span>, <span class="mono">thread_id</span>, or <span class="mono">conversation_id</span>.</p>
+      <div class="form-grid">
+        <label><span class="form-label">ID</span><input class="field" id="customId" placeholder="my-agent" autocomplete="off"></label>
+        <label><span class="form-label">Label</span><input class="field" id="customLabel" placeholder="My agent" autocomplete="off"></label>
+        <label><span class="form-label">Command</span><input class="field" id="customCommand" placeholder="/path/to/agent" autocomplete="off"></label>
+        <label><span class="form-label">Arguments</span><input class="field" id="customArgs" placeholder="--print {prompt}" autocomplete="off"></label>
+      </div>
+      <p class="small bad" id="customError" hidden></p>
+      <div class="row" style="margin-top:12px"><button class="button" id="addCustom" type="button">Add harness</button></div>
+    </article>
+
+    <p class="small muted" id="status" aria-live="polite"></p>
+  </main>
+  <script src="common.js"></script>
+  <script src="settings.js"></script>
+</body>
+</html>

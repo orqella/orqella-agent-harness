@@ -1,363 +1,104 @@
-"""Small sidecar for the installable OpenCode module.
+"""Agent Harness sidecar.
 
-OpenCode owns its own service and credentials. This sidecar reads the local
-service credential and talks to the HTTP API directly, so this module needs no
-OpenCode-specific host routes in Orqella.
+One loopback HTTP server plus a WebSocket event stream. Commands arrive over
+HTTP; normalized session events leave over `/ws/sessions/<id>`.
 """
 import base64
+import hashlib
 import hmac
 import json
 import os
-import shutil
-import subprocess
+import queue
+import struct
 import sys
 import threading
-import time
+import traceback
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
-from urllib.error import HTTPError
-from urllib.parse import parse_qs, quote, urlencode, urlparse
-from urllib.request import Request, urlopen
+from urllib.parse import parse_qs, urlparse
+
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+
+import native
+from acp import AcpError, AcpProtocolError, AcpUnavailable
+from sessions import SessionManager
 
 TOKEN = os.environ.get("ORQELLA_MODULE_TOKEN", "")
 CONFIG = json.loads(os.environ.get("ORQELLA_MODULE_CONFIG") or "{}")
 HOST_HOME = os.environ.get("ORQELLA_HOST_HOME") or os.path.expanduser("~")
-DEFAULT_BASE_URL = "http://127.0.0.1:49374"
-CONFIGURED_BASE_URL = (CONFIG.get("base_url") or "").rstrip("/")
-SERVICE_START_TIMEOUT = 20
-SERVICE_WAIT_SECONDS = 15
-SERVICE_READY_SECONDS = 10
-MODELS_TTL = 5
-_service_lock = threading.Lock()
-_service_ready_until = 0.0
-_models_cache: dict[str, object] = {"at": 0.0, "value": None}
+DATA_DIR = os.environ.get("AGENT_HARNESS_DATA_DIR") or os.path.join(
+    os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "data"
+)
+WS_GUID = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11"
+MAX_BODY = 16 * 1024 * 1024
 
-
-class ServiceCredentialMissing(RuntimeError):
-    """The OpenCode service has not created service.json yet."""
-
-
-class ServiceCredentialInvalid(RuntimeError):
-    """service.json exists but cannot be read or parsed."""
+manager = SessionManager(DATA_DIR, CONFIG)
 
 
 class RequestError(Exception):
-    def __init__(self, status: int, message: str):
+    def __init__(self, status, message):
         super().__init__(message)
         self.status = status
 
 
-def service_candidates():
-    """OpenCode keeps the managed-service credential beside its config.
-
-    The default is ~/.config/opencode on Linux, macOS, and Windows. Some
-    OpenCode builds also use the XDG state directory or a platform config
-    directory, so check those locations before reporting the service missing.
-    """
-    names = [
-        (".config", "opencode", "service.json"),
-        (".local", "state", "opencode", "service.json"),
-    ]
-    if sys.platform == "darwin":
-        names.append(("Library", "Application Support", "opencode", "service.json"))
-    if os.name == "nt":
-        names.extend(
-            [
-                ("AppData", "Roaming", "opencode", "service.json"),
-                ("AppData", "Local", "opencode", "service.json"),
-            ]
-        )
-    return [os.path.join(HOST_HOME, *parts) for parts in names]
+# -- WebSocket framing ----------------------------------------------------
 
 
-def service_config():
-    for path in service_candidates():
-        try:
-            with open(path, "r", encoding="utf-8") as handle:
-                value = json.load(handle)
-            if isinstance(value, dict):
-                return value, path
-        except FileNotFoundError:
-            continue
-        except (OSError, ValueError) as error:
-            raise ServiceCredentialInvalid(
-                f"could not read OpenCode service credential at {path}: {error}"
-            ) from error
-    raise ServiceCredentialMissing(
-        "OpenCode service credential not found. Run `opencode service start` "
-        "(or start OpenCode once) so service.json is created, then retry."
-    )
+def ws_send(sock, payload, opcode=1):
+    if isinstance(payload, str):
+        payload = payload.encode("utf-8")
+    length = len(payload)
+    header = bytearray([0x80 | opcode])
+    if length < 126:
+        header.append(length)
+    elif length < 65536:
+        header.append(126)
+        header.extend(struct.pack("!H", length))
+    else:
+        header.append(127)
+        header.extend(struct.pack("!Q", length))
+    sock.sendall(bytes(header) + payload)
 
 
-def service_base_url():
-    if CONFIGURED_BASE_URL and CONFIGURED_BASE_URL != DEFAULT_BASE_URL:
-        return CONFIGURED_BASE_URL
-    service, _path = service_config()
+def ws_read(sock):
+    """Read one client frame. Returns (opcode, payload) or (None, b"")."""
     try:
-        port = int(service.get("port") or 49374)
-    except (TypeError, ValueError):
-        port = 49374
-    return f"http://127.0.0.1:{port}"
+        first = sock.recv(2)
+    except (OSError, ValueError):
+        return None, b""
+    if len(first) < 2:
+        return None, b""
+    opcode = first[0] & 0x0F
+    masked = bool(first[1] & 0x80)
+    length = first[1] & 0x7F
+    if length == 126:
+        length = struct.unpack("!H", _recv_exact(sock, 2))[0]
+    elif length == 127:
+        length = struct.unpack("!Q", _recv_exact(sock, 8))[0]
+    if length > MAX_BODY:
+        return 8, b""
+    mask = _recv_exact(sock, 4) if masked else b""
+    payload = _recv_exact(sock, length)
+    if masked and payload:
+        payload = bytes(byte ^ mask[index % 4] for index, byte in enumerate(payload))
+    return opcode, payload
 
 
-def configured_base_is_local():
-    if not CONFIGURED_BASE_URL or CONFIGURED_BASE_URL == DEFAULT_BASE_URL:
-        return True
-    host = (urlparse(CONFIGURED_BASE_URL).hostname or "").lower()
-    return host in {"127.0.0.1", "localhost", "::1"}
+def _recv_exact(sock, count):
+    chunks = b""
+    while len(chunks) < count:
+        chunk = sock.recv(count - len(chunks))
+        if not chunk:
+            raise OSError("socket closed")
+        chunks += chunk
+    return chunks
 
 
-def service_health():
-    """Return true when the configured service answers with its credential."""
-    if not configured_base_is_local():
-        return False
-    try:
-        service, _path = service_config()
-        password = service.get("password") or ""
-        request = Request(
-            service_base_url() + "/api/info",
-            headers={
-                "Authorization": "Basic "
-                + base64.b64encode(f"opencode:{password}".encode()).decode()
-            },
-        )
-        with urlopen(request, timeout=2) as response:
-            return 200 <= response.status < 300
-    except ServiceCredentialInvalid:
-        raise
-    except Exception:
-        return False
-
-
-def service_status():
-    if not configured_base_is_local():
-        return {
-            "ok": False,
-            "running": False,
-            "url": CONFIGURED_BASE_URL,
-            "error": "OpenCode base_url must be loopback; local credentials are never sent to a remote host.",
-        }
-    try:
-        return {
-            "ok": True,
-            "running": service_health(),
-            "url": service_base_url(),
-            "error": "",
-        }
-    except ServiceCredentialInvalid as error:
-        return {"ok": False, "running": False, "url": DEFAULT_BASE_URL, "error": str(error)}
-    except ServiceCredentialMissing as error:
-        return {"ok": True, "running": False, "url": DEFAULT_BASE_URL, "error": str(error)}
-
-
-def opencode_binary():
-    """Find the OpenCode CLI without assuming it is on the daemon PATH."""
-    candidates = [
-        os.environ.get("ORQELLA_OPENCODE_BIN"),
-        shutil.which("opencode"),
-        os.path.join(HOST_HOME, ".local", "share", "mise", "shims", "opencode"),
-        os.path.join(HOST_HOME, ".local", "bin", "opencode"),
-        "/usr/local/bin/opencode",
-        "/usr/bin/opencode",
-    ]
-    for candidate in candidates:
-        if candidate and os.path.isfile(candidate) and os.access(candidate, os.X_OK):
-            return candidate
-    return None
-
-
-def sanitized_env():
-    env = os.environ.copy()
-    for key in ("ORQELLA_MODULE_TOKEN", "ORQELLA_MODULE_CONFIG"):
-        env.pop(key, None)
-    env["HOME"] = HOST_HOME
-    return env
-
-
-def ensure_service():
-    """Reuse a running OpenCode service, or start the shared one on demand.
-
-    `opencode service start` is idempotent: it returns the existing service
-    URL when one is already running. Starting a second `opencode serve` on the
-    same port is what causes the crash loops this avoids.
-    """
-    global _service_ready_until
-    if CONFIGURED_BASE_URL and CONFIGURED_BASE_URL != DEFAULT_BASE_URL:
-        # An explicit non-default URL is authoritative. Do not start a local
-        # service that the user did not ask for.
-        return
-    if time.monotonic() < _service_ready_until and service_health():
-        return
-    with _service_lock:
-        if service_health():
-            _service_ready_until = time.monotonic() + SERVICE_READY_SECONDS
-            return
-        binary = opencode_binary()
-        if not binary:
-            raise RuntimeError(
-                "OpenCode is not installed or not on PATH. Install OpenCode, "
-                "or set the module's base_url to an existing OpenCode service."
-            )
-        try:
-            result = subprocess.run(
-                [binary, "service", "start"],
-                capture_output=True,
-                text=True,
-                timeout=SERVICE_START_TIMEOUT,
-                env=sanitized_env(),
-            )
-        except (OSError, subprocess.SubprocessError) as error:
-            raise RuntimeError(f"could not start the OpenCode service: {error}") from error
-        deadline = time.monotonic() + SERVICE_WAIT_SECONDS
-        while time.monotonic() < deadline:
-            if service_health():
-                _service_ready_until = time.monotonic() + SERVICE_READY_SECONDS
-                return
-            time.sleep(0.5)
-        detail = (result.stderr or result.stdout or "").strip()
-        message = "OpenCode service did not become reachable."
-        if detail:
-            message += f" {detail[-800:]}"
-        else:
-            message += " Try `opencode service restart`."
-        raise RuntimeError(message)
-
-
-def basic_auth():
-    if not configured_base_is_local():
-        raise RuntimeError(
-            "refusing to send the local OpenCode service password to a non-loopback base_url"
-        )
-    service, _path = service_config()
-    password = service.get("password") or ""
-    return base64.b64encode(f"opencode:{password}".encode()).decode()
-
-
-def opencode_api(method, path, body=None, accept=None):
-    ensure_service()
-    data = json.dumps(body).encode() if body is not None else None
-    headers = {
-        "Authorization": "Basic " + basic_auth(),
-        "Content-Type": "application/json",
-    }
-    if accept:
-        headers["Accept"] = accept
-    request = Request(
-        service_base_url() + path,
-        data=data,
-        method=method,
-        headers=headers,
-    )
-    try:
-        with urlopen(request, timeout=60) as response:
-            output = response.read().decode()
-    except HTTPError as error:
-        detail = error.read().decode(errors="replace").strip()
-        raise RuntimeError(detail[-800:] or f"OpenCode returned HTTP {error.code}") from error
-    except Exception as error:
-        raise RuntimeError(f"could not reach OpenCode: {error}") from error
-    return json.loads(output) if output.strip() else {}
-
-
-def public_model(model):
-    return {
-        "id": model.get("id"),
-        "modelID": model.get("modelID") or model.get("id"),
-        "providerID": model.get("providerID"),
-        "name": model.get("name") or model.get("id"),
-        "family": model.get("family"),
-        "enabled": model.get("enabled", True),
-        "status": model.get("status"),
-    }
-
-
-def models(force: bool = False):
-    current = time.monotonic()
-    cached = _models_cache["value"]
-    if not force and cached and current - float(_models_cache["at"]) < MODELS_TTL:
-        return cached
-    available = opencode_api("GET", "/api/model").get("data", [])
-    default = opencode_api("GET", "/api/model/default").get("data")
-    providers = opencode_api("GET", "/api/provider").get("data", [])
-    value = {
-        "models": [public_model(model) for model in available if model.get("enabled", True)],
-        "default": public_model(default) if isinstance(default, dict) else None,
-        "providers": [
-            {"id": provider.get("id"), "name": provider.get("name") or provider.get("id")}
-            for provider in providers
-            if provider.get("id")
-        ],
-    }
-    _models_cache["at"] = current
-    _models_cache["value"] = value
-    return value
-
-
-def sessions(query):
-    try:
-        limit = max(1, min(100, int(query.get("limit", ["25"])[0])))
-    except (TypeError, ValueError):
-        limit = 25
-    parameters = {"limit": limit}
-    if query.get("cursor"):
-        parameters["cursor"] = query["cursor"][0]
-    result = opencode_api("GET", "/api/session?" + urlencode(parameters))
-    rows = []
-    for session in result.get("data", []):
-        rows.append({
-            "id": session.get("id"),
-            "title": session.get("title"),
-            "parentID": session.get("parentID"),
-            "agent": session.get("agent"),
-            "model": session.get("model"),
-            "time": session.get("time"),
-        })
-    return {"data": rows, "cursor": result.get("cursor")}
-
-
-def pair():
-    result = opencode_api("POST", "/api/pair", {})
-    code = str(result.get("code") or "")
-    if not code:
-        raise RuntimeError("OpenCode did not return a pairing code")
-    auth = opencode_api(
-        "GET",
-        "/auth/connect/" + quote(code, safe=""),
-        accept="application/json",
-    )
-    token = str(auth.get("token") or "")
-    if not token:
-        raise RuntimeError("OpenCode did not return an authentication token")
-    encoded = base64.urlsafe_b64encode(f"opencode:{token}".encode()).decode().rstrip("=")
-    return {"code": code, "auth_token": encoded}
-
-
-def launch(payload):
-    prompt = (payload.get("prompt") or "").strip()
-    if not prompt:
-        raise ValueError("a prompt is required")
-    model = payload.get("model") or {}
-    model_id = model.get("id") or model.get("modelID")
-    provider_id = model.get("providerID")
-    if not model_id or not provider_id:
-        raise ValueError("a model is required")
-    model_value = {"id": model_id, "providerID": provider_id}
-    if model.get("variant"):
-        model_value["variant"] = model["variant"]
-    created = opencode_api("POST", "/api/session", {"model": model_value})
-    session = created.get("data") or created
-    session_id = session.get("id")
-    if not session_id:
-        raise RuntimeError("OpenCode did not return a session id")
-    message = opencode_api(
-        "POST",
-        "/api/session/" + quote(session_id, safe="") + "/prompt",
-        {"text": prompt},
-    )
-    return {"session": session, "message": message.get("data") or message}
+# -- HTTP handler ---------------------------------------------------------
 
 
 class Handler(BaseHTTPRequestHandler):
-    server_version = "OrqellaOpenCode/1"
+    server_version = "OrqellaAgentHarness/1"
+    protocol_version = "HTTP/1.1"
 
     def log_message(self, *args):
         pass
@@ -386,7 +127,7 @@ class Handler(BaseHTTPRequestHandler):
             length = 0
         if length <= 0:
             return {}
-        if length > 2 * 1024 * 1024:
+        if length > MAX_BODY:
             raise RequestError(413, "request body too large")
         try:
             value = json.loads(self.rfile.read(length) or b"{}")
@@ -396,50 +137,313 @@ class Handler(BaseHTTPRequestHandler):
             raise RequestError(400, "JSON object required")
         return value
 
+    def route(self):
+        parsed = urlparse(self.path)
+        return parsed.path.rstrip("/") or "/", parse_qs(parsed.query)
+
     def do_GET(self):
+        path, query = self.route()
+        if path.startswith("/ws/"):
+            return self.handle_websocket(path, query)
         if not self.authorized():
             return
-        parsed = urlparse(self.path)
         try:
-            if parsed.path == "/health":
+            if path == "/health":
                 return self.send_json(200, {"ok": True})
-            if parsed.path == "/api/service":
-                return self.send_json(200, service_status())
-            if parsed.path == "/api/models":
-                return self.send_json(200, models())
-            if parsed.path == "/api/sessions":
-                return self.send_json(200, sessions(parse_qs(parsed.query)))
+            if path == "/api/registry":
+                return self.send_json(200, manager.registry_value())
+            if path == "/api/harnesses":
+                return self.send_json(200, manager.harnesses())
+            if path == "/api/sessions":
+                harness = (query.get("harness") or [""])[0]
+                limit = (query.get("limit") or ["50"])[0]
+                return self.send_json(200, {"sessions": manager.list(harness or None, limit)})
+            if path == "/api/sessions/discover":
+                harness = (query.get("harness") or [""])[0]
+                return self.send_json(200, manager.discover(harness))
+            if path.startswith("/api/sessions/"):
+                rest = path[len("/api/sessions/"):]
+                if rest.endswith("/transcript"):
+                    session_id = rest[: -len("/transcript")]
+                    since = (query.get("since") or ["0"])[0]
+                    return self.send_json(200, {"events": manager.transcript(session_id, since)})
+                if rest.endswith("/commands"):
+                    session_id = rest[: -len("/commands")]
+                    return self.send_json(200, manager.commands(session_id))
+                row = manager.get(rest)
+                return self.send_json(200, manager.public_session(row))
+            if path == "/api/native/status":
+                harness = (query.get("harness") or [""])[0]
+                return self.send_json(200, native.status(manager.entry(harness), HOST_HOME))
+            if path == "/api/native/activity":
+                return self.send_json(200, {"sessions": manager.native_activity()})
+            if path == "/api/fs/dirs":
+                return self.send_json(200, list_directories((query.get("path") or [HOST_HOME])[0]))
+            if path.startswith("/api/terminals/"):
+                return self.send_json(200, manager.terminal_output(path[len("/api/terminals/"):]))
             return self.send_json(404, {"error": "not found"})
         except RequestError as error:
             return self.send_json(error.status, {"error": str(error)})
-        except (RuntimeError, OSError) as error:
+        except KeyError as error:
+            return self.send_json(404, {"error": f"not found: {error}"})
+        except ValueError as error:
+            return self.send_json(400, {"error": str(error)})
+        except (AcpUnavailable, AcpProtocolError) as error:
+            return self.send_json(502, {"error": str(error)})
+        except (AcpError, RuntimeError, OSError) as error:
             return self.send_json(502, {"error": str(error)})
         except Exception as error:  # noqa: BLE001 - API boundary
+            manager.log(traceback.format_exc())
             return self.send_json(500, {"error": str(error)})
 
     def do_POST(self):
         if not self.authorized():
             return
-        parsed = urlparse(self.path)
+        path, _query = self.route()
         try:
-            if parsed.path == "/api/service/start":
-                ensure_service()
-                return self.send_json(200, service_status())
-            if parsed.path == "/api/launch":
-                return self.send_json(200, launch(self.read_json()))
-            if parsed.path == "/api/pair":
-                return self.send_json(200, pair())
+            body = self.read_json()
+            if path == "/api/registry":
+                return self.send_json(200, manager.set_registry(body))
+            if path == "/api/registry/probe":
+                harness_id = str(body.get("id") or "")
+                return self.send_json(200, manager.probe(harness_id))
+            if path == "/api/sessions/forget":
+                return self.send_json(
+                    200,
+                    manager.forget(
+                        str(body.get("harness") or ""),
+                        str(body.get("session_id") or ""),
+                        native=body.get("native", True) is not False,
+                    ),
+                )
+            if path == "/api/sessions/adopt":
+                return self.send_json(
+                    200,
+                    manager.adopt(
+                        str(body.get("harness") or ""),
+                        str(body.get("session_id") or ""),
+                        str(body.get("cwd") or ""),
+                        str(body.get("title") or ""),
+                    ),
+                )
+            if path == "/api/sessions":
+                created = manager.create(
+                    str(body.get("harness") or ""),
+                    str(body.get("cwd") or ""),
+                    str(body.get("title") or ""),
+                    body.get("additional_directories") or None,
+                )
+                return self.send_json(200, created)
+            if path.startswith("/api/sessions/"):
+                parts = path[len("/api/sessions/"):].split("/")
+                session_id = parts[0]
+                action = parts[1] if len(parts) > 1 else ""
+                if action == "prompt":
+                    return self.send_json(
+                        200,
+                        manager.prompt(session_id, body.get("text"), body.get("images") or []),
+                    )
+                if action == "command":
+                    return self.send_json(
+                        200,
+                        manager.command(
+                            session_id,
+                            str(body.get("name") or ""),
+                            str(body.get("text") or ""),
+                            body.get("images") or [],
+                        ),
+                    )
+                if action == "cancel":
+                    return self.send_json(200, manager.cancel(session_id))
+                if action == "permission":
+                    return self.send_json(
+                        200,
+                        manager.resolve_permission(
+                            str(body.get("request_id") or ""),
+                            body.get("option_id") or None,
+                        ),
+                    )
+                if action == "config":
+                    value = body.get("value")
+                    return self.send_json(
+                        200,
+                        manager.config(
+                            session_id,
+                            str(body.get("config_id") or ""),
+                            value,
+                            boolean=body.get("type") == "boolean",
+                        ),
+                    )
+                if action == "resume":
+                    return self.send_json(200, manager.resume(session_id))
+                if action == "refresh":
+                    return self.send_json(200, manager.refresh(session_id))
+                if action == "history":
+                    return self.send_json(
+                        200,
+                        manager.history(session_id, str(body.get("cursor") or "")),
+                    )
+                if action == "roots":
+                    directories = [str(item) for item in body.get("directories") or [] if str(item).strip()]
+                    row = manager.get(session_id)
+                    row["root_set"] = list(dict.fromkeys([row["cwd"], *map(os.path.abspath, directories)]))
+                    manager._save_sessions()
+                    return self.send_json(200, {"root_set": row["root_set"]})
+            if path == "/api/native/start":
+                harness = str(body.get("harness") or "")
+                return self.send_json(200, native.start(manager.entry(harness), HOST_HOME))
+            if path == "/api/native/pair":
+                harness = str(body.get("harness") or "")
+                return self.send_json(200, native.pair(manager.entry(harness), HOST_HOME))
             return self.send_json(404, {"error": "not found"})
         except RequestError as error:
             return self.send_json(error.status, {"error": str(error)})
+        except KeyError as error:
+            return self.send_json(404, {"error": f"not found: {error}"})
         except ValueError as error:
             return self.send_json(400, {"error": str(error)})
-        except (RuntimeError, OSError) as error:
+        except (AcpUnavailable, AcpProtocolError) as error:
+            return self.send_json(502, {"error": str(error)})
+        except (AcpError, RuntimeError, OSError) as error:
             return self.send_json(502, {"error": str(error)})
         except Exception as error:  # noqa: BLE001 - API boundary
+            manager.log(traceback.format_exc())
             return self.send_json(500, {"error": str(error)})
+
+    def do_PUT(self):
+        return self.do_POST()
+
+    def do_DELETE(self):
+        if not self.authorized():
+            return
+        path, query = self.route()
+        try:
+            if path.startswith("/api/sessions/"):
+                native = (query.get("native") or ["1"])[0].lower() not in {"0", "false", "no"}
+                return self.send_json(200, manager.delete(path[len("/api/sessions/"):], native=native))
+            return self.send_json(404, {"error": "not found"})
+        except KeyError as error:
+            return self.send_json(404, {"error": f"not found: {error}"})
+        except ValueError as error:
+            return self.send_json(400, {"error": str(error)})
+        except Exception as error:  # noqa: BLE001 - API boundary
+            manager.log(traceback.format_exc())
+            return self.send_json(500, {"error": str(error)})
+
+    # -- WebSocket --------------------------------------------------------
+
+    def handle_websocket(self, path, query):
+        if not self.authorized():
+            return
+        key = self.headers.get("Sec-WebSocket-Key") or ""
+        upgrade = (self.headers.get("Upgrade") or "").lower()
+        if not key or upgrade != "websocket":
+            return self.send_json(400, {"error": "websocket upgrade required"})
+        session_id = path[len("/ws/sessions/"):] if path.startswith("/ws/sessions/") else ""
+        try:
+            manager.get(session_id)
+        except KeyError:
+            return self.send_json(404, {"error": "session not found"})
+        accept = base64.b64encode(hashlib.sha1((key + WS_GUID).encode()).digest()).decode()
+        self.send_response(101, "Switching Protocols")
+        self.send_header("Upgrade", "websocket")
+        self.send_header("Connection", "Upgrade")
+        self.send_header("Sec-WebSocket-Accept", accept)
+        self.end_headers()
+        self.wfile.flush()
+        try:
+            self.stream_events(session_id, (query.get("since") or ["0"])[0])
+        except (OSError, ValueError):
+            pass
+        finally:
+            try:
+                self.connection.close()
+            except OSError:
+                pass
+
+    def stream_events(self, session_id, since):
+        subscriber = manager.subscribe(session_id)
+        last = int(since or 0)
+        try:
+            backlog = manager.transcript(session_id, last)
+            for event in backlog:
+                ws_send(self.connection, json.dumps(event))
+                last = max(last, int(event.get("seq") or 0))
+            ws_send(
+                self.connection,
+                json.dumps({"type": "ready", "session": manager.public_session(manager.get(session_id))}),
+            )
+            # Read client frames (close/ping) on a side thread; the main loop
+            # only writes events.
+            stop = threading.Event()
+
+            def drain():
+                while not stop.is_set():
+                    opcode, payload = ws_read(self.connection)
+                    if opcode is None or opcode == 8:
+                        stop.set()
+                        return
+                    if opcode == 9:
+                        try:
+                            ws_send(self.connection, payload, opcode=10)
+                        except OSError:
+                            stop.set()
+                            return
+
+            threading.Thread(target=drain, name=f"ws-{session_id}", daemon=True).start()
+            while not stop.is_set():
+                try:
+                    event = subscriber.get(timeout=25)
+                except queue.Empty:
+                    try:
+                        ws_send(self.connection, b"", opcode=9)
+                    except OSError:
+                        return
+                    continue
+                ws_send(self.connection, json.dumps(event))
+                last = max(last, int(event.get("seq") or 0))
+        finally:
+            manager.unsubscribe(session_id, subscriber)
+
+
+def list_directories(path):
+    path = os.path.abspath(os.path.expanduser(str(path or HOST_HOME)))
+    if not os.path.isdir(path):
+        raise ValueError(f"`{path}` is not a directory")
+    entries = []
+    try:
+        names = sorted(os.listdir(path), key=str.lower)
+    except OSError as error:
+        raise ValueError(f"could not read {path}: {error}") from error
+    for name in names:
+        if name.startswith("."):
+            continue
+        candidate = os.path.join(path, name)
+        try:
+            if os.path.isdir(candidate):
+                entries.append({"name": name, "path": candidate})
+        except OSError:
+            continue
+        if len(entries) >= 500:
+            break
+    parent = os.path.dirname(path)
+    return {
+        "path": path,
+        "parent": parent if parent != path else None,
+        "home": HOST_HOME,
+        "entries": entries,
+    }
+
+
+def main():
+    port = int(os.environ["ORQELLA_MODULE_PORT"])
+    server = ThreadingHTTPServer(("127.0.0.1", port), Handler)
+    server.daemon_threads = True
+    try:
+        server.serve_forever()
+    finally:
+        manager.close()
 
 
 if __name__ == "__main__":
-    port = int(os.environ["ORQELLA_MODULE_PORT"])
-    ThreadingHTTPServer(("127.0.0.1", port), Handler).serve_forever()
+    main()

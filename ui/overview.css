@@ -21,6 +21,7 @@ body {
   justify-content: space-between;
   gap: 10px;
 }
+.ov-heading { min-width: 0; flex: 1; }
 .eyebrow {
   text-transform: uppercase;
   letter-spacing: .15em;
@@ -34,6 +35,18 @@ h1 {
   margin: 0;
   font-weight: 560;
 }
+.ov-harness {
+  margin-top: 4px;
+  max-width: 100%;
+  background: transparent;
+  border: 0;
+  color: var(--muted);
+  font: inherit;
+  padding: 0;
+  outline: none;
+  cursor: pointer;
+}
+.ov-harness:hover { color: var(--ink); }
 .head-actions {
   display: flex;
   align-items: center;
@@ -46,11 +59,10 @@ h1 {
   border: 1px solid var(--line);
   border-radius: 999px;
   padding: 3px 7px;
+  white-space: nowrap;
 }
-.state.ok {
-  color: var(--green);
-  border-color: var(--success-border);
-}
+.state.ok { color: var(--green); border-color: var(--success-border); }
+.state.bad { color: var(--red); border-color: var(--red); }
 
 .icon {
   width: 24px;
@@ -71,7 +83,7 @@ h1 {
 #launch {
   display: flex;
   flex-direction: column;
-  gap: 7px;
+  gap: 6px;
 }
 textarea {
   width: 100%;
@@ -90,6 +102,33 @@ textarea:focus {
   box-shadow: 0 0 0 3px var(--focus-ring);
 }
 textarea::placeholder { color: var(--muted-2); }
+
+.cwd-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  color: var(--muted);
+  font-size: 10px;
+}
+.cwd {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  direction: ltr;
+  text-align: left;
+  min-width: 0;
+}
+.link {
+  border: 0;
+  background: transparent;
+  color: var(--mint);
+  font: inherit;
+  font-size: 10px;
+  cursor: pointer;
+  padding: 0;
+}
+.link:hover { text-decoration: underline; }
 
 .controls {
   display: flex;
@@ -119,7 +158,8 @@ select {
   white-space: nowrap;
 }
 .start:disabled,
-select:disabled {
+select:disabled,
+.ov-harness:disabled {
   opacity: .45;
   cursor: not-allowed;
 }

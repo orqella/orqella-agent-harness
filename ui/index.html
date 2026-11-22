@@ -1,4 +1,141 @@
 <!doctype html>
-<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>OpenCode</title><link rel="stylesheet" href="/assets/theme.css"><link rel="stylesheet" href="/assets/module.css"><link rel="stylesheet" href="style.css"></head>
-<body><main class="module" id="screen"><div class="boot"><span class="boot-mark" aria-hidden="true"></span><div><p class="eyebrow">Agent workspace</p><h1 id="title">Opening OpenCode…</h1><p class="muted" id="detail">Connecting to the local coding agent.</p></div></div><div class="actions" id="actions" hidden><button id="retry">Try again</button></div></main><script src="app.js"></script></body>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>Agent Harness</title>
+  <link rel="stylesheet" href="/assets/theme.css">
+  <link rel="stylesheet" href="/assets/module.css">
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+  <main class="harness" id="harness">
+    <header class="harness-bar">
+      <div class="harness-heading">
+        <p class="eyebrow">Agent harness</p>
+        <h1 id="title">Workspace</h1>
+        <span class="chip" id="statusChip">idle</span>
+      </div>
+      <div class="row wrap harness-actions">
+        <button class="button ghost small-button mobile-only" id="sessionsButton" type="button" aria-expanded="false" aria-controls="rail">Sessions</button>
+      </div>
+    </header>
+
+    <div class="harness-body">
+      <div class="rail-backdrop" id="railBackdrop" hidden></div>
+      <aside class="harness-rail" id="rail">
+        <div class="rail-head">
+          <select class="field" id="harnessFilter" aria-label="Filter by harness"><option value="">All harnesses</option></select>
+          <button class="button ghost small-button mobile-only rail-close" id="closeRail" type="button">Close</button>
+        </div>
+        <div class="session-list" id="sessionList"></div>
+        <p class="small muted rail-note" id="railNote"></p>
+        <div class="rail-actions">
+          <button class="button small-button" id="railNew" type="button">New session</button>
+          <button class="button ghost small-button" id="railNative" type="button" hidden>Open native workspace</button>
+          <button class="button ghost small-button" id="railRefresh" type="button">Refresh sessions</button>
+        </div>
+      </aside>
+
+      <section class="harness-main">
+        <div class="transcript" id="transcript" aria-live="polite"></div>
+        <div class="empty-harness" id="empty" hidden>
+          <p class="eyebrow">No conversation selected</p>
+          <h2>Start with a harness</h2>
+          <p class="muted small">Pick a configured harness, choose a folder, and describe the work. OpenCode opens its own workspace; ACP harnesses render here.</p>
+          <button class="button" id="emptyNew" type="button">New session</button>
+        </div>
+
+        <form class="composer" id="composer" hidden>
+          <div class="command-menu" id="commandMenu" hidden></div>
+          <div class="approval" id="approval" hidden></div>
+          <div class="composer-input">
+            <textarea class="field" id="prompt" rows="2" placeholder="Describe the next step…" aria-label="Prompt"></textarea>
+            <div class="composer-buttons">
+              <button class="button ghost small-button" id="stop" type="button" hidden>Stop</button>
+              <button class="button" id="send" type="submit">Send</button>
+            </div>
+          </div>
+          <div class="composer-tools" id="composerTools">
+            <div class="row wrap configs" id="configs"></div>
+            <label class="attach small muted" title="Attach an image">
+              <input type="file" id="imageInput" accept="image/*" hidden>
+              <span id="imageName">Attach</span>
+            </label>
+            <p class="composer-hint small muted">Enter sends. Shift+Enter adds a new line. Alt+E (or Ctrl/Cmd+Shift+E) expands or collapses all tool calls and thinking.</p>
+          </div>
+          <div class="composer-bar">
+            <button class="button ghost small-button" id="optionsToggle" type="button" aria-expanded="false" aria-controls="composerTools">Options</button>
+            <div class="view-toggles">
+              <button class="view-toggle" id="toggleThoughts" type="button" aria-pressed="false" title="Hide thoughts">Thoughts</button>
+              <button class="view-toggle" id="toggleTools" type="button" aria-pressed="false" title="Hide tool calls">Tools</button>
+            </div>
+            <div class="composer-status">
+              <button class="link-button small" id="resume" type="button" hidden>Resume session</button>
+              <span class="context-chip" id="contextChip" hidden title="">
+                <span class="context-track"><span class="context-fill" id="contextFill"></span></span>
+                <span id="contextText"></span>
+              </span>
+            </div>
+          </div>
+          <p class="small bad" id="composerError" hidden></p>
+        </form>
+      </section>
+
+      <aside class="harness-side">
+        <details class="side-card" open>
+          <summary>Plan</summary>
+          <div class="side-body" id="plan"><p class="small muted">No plan yet.</p></div>
+        </details>
+        <details class="side-card">
+          <summary>Session</summary>
+          <div class="side-body" id="sessionInfo"></div>
+        </details>
+        <details class="side-card" open>
+          <summary>Usage</summary>
+          <div class="side-body" id="usage"><p class="small muted">Reported by the harness when available.</p></div>
+        </details>
+      </aside>
+    </div>
+  </main>
+
+  <div class="modal" id="newModal" hidden>
+    <div class="modal-box" role="dialog" aria-modal="true" aria-labelledby="newTitle">
+      <div class="row spread"><div><p class="eyebrow">New session</p><h2 id="newTitle">Choose a harness</h2></div><button class="icon-button" id="closeNew" aria-label="Close">×</button></div>
+      <label class="form-label" for="newHarness">Harness</label>
+      <select class="field" id="newHarness"></select>
+      <p class="small muted" id="newHarnessHint"></p>
+      <label class="form-label" for="newCwd" style="margin-top:12px">Workspace folder</label>
+      <div class="row">
+        <input class="field mono" id="newCwd" autocomplete="off" placeholder="/home/you/Projects">
+        <button class="button ghost" id="browse" type="button">Browse</button>
+      </div>
+      <label class="form-label" for="newTitleInput" style="margin-top:12px">Title (optional)</label>
+      <input class="field" id="newTitleInput" autocomplete="off" placeholder="What are you working on?">
+      <p class="small bad" id="newError" hidden></p>
+      <div class="row" style="justify-content:flex-end;margin-top:18px"><button class="button ghost" id="cancelNew" type="button">Cancel</button><button class="button" id="createSession" type="button">Start</button></div>
+    </div>
+  </div>
+
+  <div class="modal" id="deleteModal" hidden>
+    <div class="modal-box" role="dialog" aria-modal="true" aria-labelledby="deleteHeading">
+      <div class="row spread"><div><p class="eyebrow">Delete conversation</p><h2 id="deleteHeading">Delete this conversation?</h2></div><button class="icon-button" id="closeDelete" aria-label="Close">×</button></div>
+      <p class="small muted" id="deleteDetail"></p>
+      <p class="small bad">This removes it from Orqella and, where the harness supports deletion, from the harness history.</p>
+      <div class="row" style="justify-content:flex-end;margin-top:18px"><button class="button ghost" id="cancelDelete" type="button">Cancel</button><button class="button danger" id="confirmDelete" type="button">Delete</button></div>
+    </div>
+  </div>
+
+  <div class="modal" id="dirModal" hidden>
+    <div class="modal-box" role="dialog" aria-modal="true" aria-labelledby="dirTitle">
+      <div class="row spread"><div><p class="eyebrow">Workspace</p><h2 id="dirTitle">Choose a folder</h2></div><button class="icon-button" id="closeDir" aria-label="Close">×</button></div>
+      <p class="small mono" id="dirPath"></p>
+      <div class="dir-list" id="dirList"></div>
+      <div class="row" style="justify-content:flex-end;margin-top:16px"><button class="button ghost" id="dirUp" type="button">Up</button><button class="button" id="dirChoose" type="button">Use this folder</button></div>
+    </div>
+  </div>
+
+  <script src="common.js"></script>
+  <script src="app.js"></script>
+</body>
 </html>
