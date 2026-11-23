@@ -1,5 +1,7 @@
 # Agent Harness
 
+![Agent Harness with a session, plan, usage, transcript, and expanded tool calls](docs/screenshot.png)
+
 Agent Harness is the Orqella module for working with coding agents. It gives
 every supported harness one workspace: a session list, a conversation view with
 streamed messages and tool activity, approvals, plans, diffs, terminals, and
