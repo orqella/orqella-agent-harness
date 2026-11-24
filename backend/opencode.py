@@ -57,18 +57,28 @@ def service_candidates(host_home):
 
 
 def service_config(config, host_home):
+    fallback = None
     for path in service_candidates(host_home):
         try:
             with open(path, "r", encoding="utf-8") as handle:
                 value = json.load(handle)
-            if isinstance(value, dict):
+            if not isinstance(value, dict):
+                continue
+            # OpenCode has shipped service.json variants: the config copy has
+            # a port, while the state copy has a url. Prefer whichever entry
+            # can actually identify the endpoint.
+            if value.get("port") or value.get("url"):
                 return value, path
+            if fallback is None:
+                fallback = (value, path)
         except FileNotFoundError:
             continue
         except (OSError, ValueError) as error:
             raise ServiceCredentialInvalid(
                 f"could not read OpenCode service credential at {path}: {error}"
             ) from error
+    if fallback is not None:
+        return fallback
     raise ServiceCredentialMissing(
         "OpenCode service credential not found. Run `opencode service start` "
         "(or start OpenCode once) so service.json is created, then retry."
@@ -81,9 +91,14 @@ def service_base_url(config, host_home):
         return configured
     service, _path = service_config(config, host_home)
     try:
-        port = int(service.get("port") or 49374)
+        port = int(service.get("port") or 0)
     except (TypeError, ValueError):
-        port = 49374
+        port = 0
+    if not port:
+        from urllib.parse import urlparse
+
+        url = str(service.get("url") or "")
+        port = urlparse(url).port or 49374
     return f"http://127.0.0.1:{port}"
 
 
