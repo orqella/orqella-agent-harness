@@ -572,6 +572,7 @@ class SessionManagerTests(unittest.TestCase):
         self.assertTrue(discovered["supported"])
         self.assertEqual(discovered["sessions"][0]["session_id"], "ses_remote")
         self.assertTrue(discovered["sessions"][0]["native_active"])
+        self.assertEqual(discovered["sessions"][0]["status"], "working")
 
         with mock.patch.object(
             sessions_module.opencode_service, "remove", return_value=True
@@ -718,10 +719,38 @@ class SessionManagerTests(unittest.TestCase):
                 return_value={"ses_native": {"active": True, "updated": 123456}},
             ),
         ):
-            self.manager._activity_cache = {"at": 0.0, "value": {}}
+            self.manager._activity_cache = {"at": 0.0, "value": {}, "available": False}
             public = self.manager.public_session(row)
         self.assertTrue(public["native_active"])
         self.assertEqual(public["native_updated"], 123456)
+        self.assertEqual(public["status"], "working")
+
+        row["status"] = "working"
+        with (
+            mock.patch.object(self.manager, "registry", registry),
+            mock.patch.object(
+                sessions_module,
+                "opencode_activity",
+                return_value={"ses_native": {"active": False, "updated": 123466}},
+            ),
+        ):
+            self.manager._activity_cache = {"at": 0.0, "value": {}, "available": False}
+            public = self.manager.public_session(row)
+        self.assertFalse(public["native_active"])
+        self.assertEqual(public["status"], "idle")
+
+        row["status"] = "waiting"
+        with (
+            mock.patch.object(self.manager, "registry", registry),
+            mock.patch.object(
+                sessions_module,
+                "opencode_activity",
+                return_value={"ses_native": {"active": True, "updated": 123476}},
+            ),
+        ):
+            self.manager._activity_cache = {"at": 0.0, "value": {}, "available": False}
+            public = self.manager.public_session(row)
+        self.assertEqual(public["status"], "waiting")
 
     def test_refresh_replaces_history_from_the_harness(self):
         created = self.manager.create("mock", self.workspace)

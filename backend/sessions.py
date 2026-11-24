@@ -162,7 +162,7 @@ class SessionManager:
         self.connections = {}
         self.exec_drivers = {}
         self._probe_cache = {}
-        self._activity_cache = {"at": 0.0, "value": {}}
+        self._activity_cache = {"at": 0.0, "value": {}, "available": False}
         self._hidden_rows, self.hidden_sessions = self._load_hidden()
         self._refreshing = set()
         self._service_watch_lock = threading.Lock()
@@ -520,6 +520,7 @@ class SessionManager:
                     updated = int(times.get("updated") or 0)
                 except (TypeError, ValueError):
                     busy, idle, updated = 0, 0, 0
+                active = busy > 0 and busy > idle
                 output.append(
                     {
                         "harness": harness_id,
@@ -528,7 +529,8 @@ class SessionManager:
                         "title": session.get("title") or "Untitled session",
                         "updated_at": opencode_service.iso_time(updated),
                         "discovered": True,
-                        "native_active": busy > idle,
+                        "status": "working" if active else "idle",
+                        "native_active": active,
                         "native_updated": updated,
                     }
                 )
@@ -624,12 +626,20 @@ class SessionManager:
             ),
             None,
         )
-        value = {}
+        value = None
         if entry:
             web = entry.get("web") or {}
             value = opencode_activity({"base_url": web.get("url") or ""}, self.host_home_dir)
-        self._activity_cache = {"at": now, "value": value}
-        return value
+        available = isinstance(value, dict)
+        self._activity_cache = {
+            "at": now,
+            "value": value if available else {},
+            "available": available,
+        }
+        return self._activity_cache["value"]
+
+    def native_activity_available(self):
+        return bool(self._activity_cache.get("available"))
 
     def public_session(self, row):
         native = {}
@@ -645,6 +655,15 @@ class SessionManager:
         status = row.get("status") or "idle"
         if status == "detached":
             status = "idle"
+        if native:
+            # The managed service is authoritative for live activity: it knows
+            # about turns started by other clients and survives sidecar restarts
+            # where the stored status is only a cache.
+            if native_active:
+                if status != "waiting":
+                    status = "working"
+            elif status in {"working", "starting"}:
+                status = "idle"
         return {
             "id": row["id"],
             "harness": row["harness"],
@@ -1134,7 +1153,9 @@ class SessionManager:
                 continue
             times = info.get("time") or {}
             try:
-                busy = int(times.get("busy") or 0) > int(times.get("idle") or 0)
+                busy_ms = int(times.get("busy") or 0)
+                idle_ms = int(times.get("idle") or 0)
+                busy = busy_ms > 0 and busy_ms > idle_ms
             except (TypeError, ValueError):
                 busy = False
             status = row.get("status")

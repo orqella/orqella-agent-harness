@@ -1,7 +1,7 @@
 schema = 1
 id = "agent-harness"
 name = "Agent Harness"
-version = "0.1.0"
+version = "0.1.2"
 api_version = "1"
 description = "A configurable workspace for coding-agent harnesses such as OpenCode, Claude Code, Codex, and Gemini."
 entry = "ui/index.html"

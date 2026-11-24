@@ -57,15 +57,27 @@
             </div>
           </div>
           <div class="composer-tools" id="composerTools">
-            <div class="row wrap configs" id="configs"></div>
-            <label class="attach small muted" title="Attach an image">
-              <input type="file" id="imageInput" accept="image/*" hidden>
-              <span id="imageName">Attach</span>
-            </label>
-            <p class="composer-hint small muted">Enter sends. Shift+Enter adds a new line. Alt+E (or Ctrl/Cmd+Shift+E) expands or collapses all tool calls and thinking.</p>
+            <div class="composer-section" id="composerConfigSection" hidden>
+              <p class="eyebrow">Session options</p>
+              <div class="row wrap configs" id="configs"></div>
+            </div>
+            <div class="composer-section">
+              <p class="eyebrow">Hotkeys</p>
+              <div class="hotkey-list" id="hotkeyList">
+                <button class="hotkey" type="button" data-hotkey="send"><span class="hotkey-action">Send message</span><span class="hotkey-keys"><kbd>Enter</kbd></span></button>
+                <button class="hotkey" type="button" data-hotkey="newline"><span class="hotkey-action">New line</span><span class="hotkey-keys"><kbd>Shift</kbd><span class="hotkey-plus">+</span><kbd>Enter</kbd></span></button>
+                <button class="hotkey" type="button" data-hotkey="toggle-all" title="Alt+E, or Ctrl/Cmd+Shift+E"><span class="hotkey-action">Expand or collapse all</span><span class="hotkey-keys"><kbd>Alt</kbd><span class="hotkey-plus">+</span><kbd>E</kbd></span></button>
+                <button class="hotkey" type="button" data-hotkey="command"><span class="hotkey-action">Command menu</span><span class="hotkey-keys"><kbd>/</kbd></span></button>
+                <button class="hotkey" type="button" data-hotkey="close"><span class="hotkey-action">Close menus</span><span class="hotkey-keys"><kbd>Esc</kbd></span></button>
+              </div>
+            </div>
           </div>
           <div class="composer-bar">
-            <button class="button ghost small-button" id="optionsToggle" type="button" aria-expanded="false" aria-controls="composerTools">Options</button>
+            <div class="composer-left">
+              <button class="button ghost small-button" id="optionsToggle" type="button" aria-expanded="false" aria-controls="composerTools" title="Keyboard shortcuts, actions, and session options">Hotkeys</button>
+              <button class="button ghost small-button" id="attachButton" type="button" title="Attach an image"><span id="imageName">Attach</span></button>
+              <input type="file" id="imageInput" accept="image/*" hidden>
+            </div>
             <div class="view-toggles">
               <button class="view-toggle" id="toggleThoughts" type="button" aria-pressed="false" title="Hide thoughts">Thoughts</button>
               <button class="view-toggle" id="toggleTools" type="button" aria-pressed="false" title="Hide tool calls">Tools</button>

@@ -176,7 +176,13 @@ class Handler(BaseHTTPRequestHandler):
                 harness = (query.get("harness") or [""])[0]
                 return self.send_json(200, native.status(manager.entry(harness), HOST_HOME))
             if path == "/api/native/activity":
-                return self.send_json(200, {"sessions": manager.native_activity()})
+                return self.send_json(
+                    200,
+                    {
+                        "sessions": manager.native_activity(),
+                        "available": manager.native_activity_available(),
+                    },
+                )
             if path == "/api/fs/dirs":
                 return self.send_json(200, list_directories((query.get("path") or [HOST_HOME])[0]))
             if path.startswith("/api/terminals/"):

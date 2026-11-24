@@ -37,6 +37,8 @@
   let pendingApprovals = new Map();
   let filter = "";
   let statusValue = "idle";
+  let historyOpen = false;
+  const inactiveSince = new Map();
 
   const storage = {
     async get(key) {
@@ -53,15 +55,19 @@
   const displayStatus = (session) => {
     if (!session) return "idle";
     const status = session.status === "detached" ? "idle" : session.status || "idle";
-    if (session.native_active && !["working", "waiting", "failed"].includes(status)) return "active";
-    return status;
+    if (status === "waiting" || status === "failed") return status;
+    if (session.native_active) return "working";
+    return status === "starting" ? "working" : status;
   };
 
   const setStatus = (status) => {
     statusValue = status || "idle";
     const chip = $("statusChip");
     chip.textContent = statusValue;
-    chip.className = `chip ${["working", "waiting", "idle", "active"].includes(statusValue) ? (statusValue === "idle" || statusValue === "active" ? "ok" : "warn") : statusValue === "detached" || statusValue === "failed" ? "bad" : ""}`;
+    const kind = statusValue === "working" || statusValue === "waiting"
+      ? "warn"
+      : statusValue === "failed" || statusValue === "detached" ? "bad" : "ok";
+    chip.className = `chip ${kind}`;
     const busy = statusValue === "working" || statusValue === "waiting";
     const canSteer = busy && Boolean(current?.native_active);
     $("stop").hidden = !busy;
@@ -144,9 +150,33 @@
       let changed = false;
       const apply = (session, id) => {
         if (!session || !id) return;
-        const active = Boolean((map[id] || {}).active);
-        if (session.native_active !== active) {
+        const hint = map[id];
+        if (!hint) return;
+        const active = Boolean(hint.active);
+        let status = session.status;
+        if (session.status !== "waiting" && session.status !== "failed") {
+          if (active) {
+            inactiveSince.delete(id);
+            status = "working";
+          } else if (session.status === "working") {
+            // Activity includes a short cache, and a prompt sent locally can
+            // arrive before the service records it as busy. Require a few
+            // inactive polls before overriding a working session; a real turn
+            // end also arrives over the session WebSocket.
+            const since = inactiveSince.get(id) || Date.now();
+            inactiveSince.set(id, since);
+            if (Date.now() - since > 12000) {
+              inactiveSince.delete(id);
+              status = "idle";
+            }
+          } else {
+            inactiveSince.delete(id);
+            status = "idle";
+          }
+        }
+        if (session.native_active !== active || session.status !== status) {
           session.native_active = active;
+          session.status = status;
           changed = true;
         }
       };
@@ -237,6 +267,18 @@
     $("optionsToggle").setAttribute("aria-expanded", "false");
   }
 
+  function closeOverlays() {
+    if (!$("deleteModal").hidden) {
+      finishDelete(false);
+      return;
+    }
+    closeModal("newModal");
+    closeModal("dirModal");
+    closeCommandMenu();
+    closeRail();
+    collapseOptions();
+  }
+
   async function refreshAll() {
     try {
       await loadAll();
@@ -260,6 +302,34 @@
     };
   }
 
+  function sessionRow(session) {
+    const info = harness(session.harness);
+    const discoveredRow = Boolean(session.discovered);
+    const active = current && (discoveredRow
+      ? current.harness === session.harness && current.harness_session_id === session.session_id
+      : current.id === session.id);
+    const status = displayStatus(session);
+    const chip = discoveredRow && !session.native_active ? "history" : status;
+    const chipClass = chip === "working" || chip === "waiting"
+      ? "warn"
+      : chip === "failed" || chip === "detached" ? "bad" : chip === "history" ? "" : "ok";
+    const attributes = discoveredRow
+      ? `data-history="1" data-harness="${H.escapeHtml(session.harness)}" data-harness-session="${H.escapeHtml(session.session_id)}" data-cwd="${H.escapeHtml(session.cwd || "")}" data-title="${H.escapeHtml(session.title || "")}"`
+      : `data-session="${H.escapeHtml(session.id)}"`;
+    const title = H.escapeHtml(session.title || "Untitled");
+    const remove = discoveredRow
+      ? `data-delete-harness="${H.escapeHtml(session.harness)}" data-delete-session="${H.escapeHtml(session.session_id)}" data-delete-title="${title}"`
+      : `data-delete-local="${H.escapeHtml(session.id)}" data-delete-title="${title}"`;
+    return `<div class="session-row-wrap">
+      <button type="button" class="session-row${active ? " active" : ""}" ${attributes} title="${title}">
+        <span class="session-row-top"><b>${title}</b><span class="chip ${chipClass}">${H.escapeHtml(chip)}</span></span>
+        <span class="session-row-bottom"><span>${H.escapeHtml(info.label)}</span><span>${H.escapeHtml(H.fmtWhen(session.updated_at))}</span></span>
+        <span class="session-row-cwd mono">${H.escapeHtml(session.cwd || "")}</span>
+      </button>
+      <button type="button" class="session-delete" ${remove} title="Delete conversation" aria-label="Delete conversation">×</button>
+    </div>`;
+  }
+
   function renderRail() {
     const list = mergedSessions().filter((session) => !filter || session.harness === filter);
     if (!list.length) {
@@ -267,31 +337,19 @@
       $("railNote").textContent = "";
       return;
     }
-    const rows = list.map((session) => {
-      const info = harness(session.harness);
-      const discoveredRow = Boolean(session.discovered);
-      const active = current && (discoveredRow
-        ? current.harness === session.harness && current.harness_session_id === session.session_id
-        : current.id === session.id);
-      const chip = session.native_active ? "active" : discoveredRow ? "history" : session.status === "detached" ? "idle" : session.status;
-      const attributes = discoveredRow
-        ? `data-history="1" data-harness="${H.escapeHtml(session.harness)}" data-harness-session="${H.escapeHtml(session.session_id)}" data-cwd="${H.escapeHtml(session.cwd || "")}" data-title="${H.escapeHtml(session.title || "")}"`
-        : `data-session="${H.escapeHtml(session.id)}"`;
-      const chipClass = discoveredRow ? "" : chip === "working" || chip === "waiting" ? "warn" : chip === "failed" || chip === "detached" ? "bad" : "ok";
-      const title = H.escapeHtml(session.title || "Untitled");
-      const remove = discoveredRow
-        ? `data-delete-harness="${H.escapeHtml(session.harness)}" data-delete-session="${H.escapeHtml(session.session_id)}" data-delete-title="${title}"`
-        : `data-delete-local="${H.escapeHtml(session.id)}" data-delete-title="${title}"`;
-      return `<div class="session-row-wrap">
-        <button type="button" class="session-row${active ? " active" : ""}" ${attributes} title="${title}">
-          <span class="session-row-top"><b>${title}</b><span class="chip ${chipClass}">${H.escapeHtml(chip)}</span></span>
-          <span class="session-row-bottom"><span>${H.escapeHtml(info.label)}</span><span>${H.escapeHtml(H.fmtWhen(session.updated_at))}</span></span>
-          <span class="session-row-cwd mono">${H.escapeHtml(session.cwd || "")}</span>
-        </button>
-        <button type="button" class="session-delete" ${remove} title="Delete conversation" aria-label="Delete conversation">×</button>
-      </div>`;
-    }).join("");
-    $("sessionList").innerHTML = rows;
+    // Sessions the user has open stay visible; discovered history collapses so
+    // the rail is not dominated by conversations from another client.
+    const visible = list.filter((session) => !session.discovered || session.native_active);
+    const history = list.filter((session) => session.discovered && !session.native_active);
+    const rows = (items) => items.map(sessionRow).join("");
+    const emptyVisible = history.length ? "No open sessions." : "No sessions yet.";
+    $("sessionList").innerHTML = `
+      <div class="session-group">${visible.length ? rows(visible) : `<div class="empty small">${emptyVisible}</div>`}</div>
+      ${history.length ? `<details class="session-history"${historyOpen ? " open" : ""}>
+        <summary><span>History</span><span class="chip">${history.length}</span></summary>
+        <div class="session-history-list">${rows(history)}</div>
+      </details>` : ""}
+    `;
     $("sessionList").querySelectorAll("[data-session], [data-history]").forEach((button) => {
       button.onclick = () => {
         if (button.dataset.history) {
@@ -306,8 +364,12 @@
         return deleteConversation(button);
       };
     });
-    const history = list.filter((session) => session.discovered).length;
-    $("railNote").textContent = `${list.length} session${list.length === 1 ? "" : "s"}${history ? ` · ${history} from history` : ""}`;
+    const details = $("sessionList").querySelector(".session-history");
+    if (details) details.ontoggle = () => { historyOpen = details.open; };
+    $("railNote").textContent = [
+      `${visible.length} session${visible.length === 1 ? "" : "s"}`,
+      ...(history.length ? [`${history.length} in history`] : []),
+    ].join(" · ");
   }
 
   let deleteRequest = null;
@@ -579,6 +641,7 @@
         return;
       case "turn_end":
         streamTurn += 1;
+        flushMessageRenders();
         $("approval").hidden = true;
         return;
       case "usage":
@@ -790,6 +853,39 @@
     transcript.scrollTop = transcript.scrollHeight;
   }
 
+  // Streaming deltas arrive far faster than a display frame. Rebuilding the
+  // markdown for every chunk turns a long answer into quadratic DOM work on
+  // WebKit and can keep a web process at a full core. Coalesce updates per
+  // block and paint at most every STREAM_RENDER_MS.
+  const STREAM_RENDER_MS = 80;
+
+  function scheduleMessageRender(stored, scroll) {
+    if (scroll) stored.scroll = true;
+    if (stored.timer) return;
+    stored.timer = setTimeout(() => {
+      stored.timer = null;
+      if (!stored.el.isConnected) return;
+      stored.body.innerHTML = H.markdown(stored.text);
+      if (stored.scroll) {
+        stored.scroll = false;
+        scrollTranscript();
+      }
+    }, STREAM_RENDER_MS);
+  }
+
+  function flushMessageRenders() {
+    for (const stored of blocks.values()) {
+      if (!stored.timer) continue;
+      clearTimeout(stored.timer);
+      stored.timer = null;
+      if (stored.el.isConnected) stored.body.innerHTML = H.markdown(stored.text);
+      if (stored.scroll) {
+        stored.scroll = false;
+        scrollTranscript();
+      }
+    }
+  }
+
   function setThoughtExpanded(block, expanded) {
     if (!block) return;
     block.classList.toggle("collapsed", !expanded);
@@ -810,6 +906,48 @@
       entry.userToggled = false;
       setToolExpanded(entry, expanded);
     }
+  }
+
+  function toggleAllCollapsibles() {
+    const anyExpanded = [...toolEls.values()].some((entry) => entry.expanded)
+      || [...$("transcript").querySelectorAll(".message.thought")].some((block) => !block.classList.contains("collapsed"));
+    applyAllCollapsibles(!anyExpanded);
+  }
+
+  function insertPromptText(text) {
+    const prompt = $("prompt");
+    const start = prompt.selectionStart ?? prompt.value.length;
+    const end = prompt.selectionEnd ?? start;
+    prompt.value = prompt.value.slice(0, start) + text + prompt.value.slice(end);
+    const caret = start + text.length;
+    prompt.focus();
+    prompt.setSelectionRange(caret, caret);
+    prompt.dispatchEvent(new Event("input", { bubbles: true }));
+  }
+
+  function runHotkey(action) {
+    if (action === "send") {
+      collapseOptions();
+      if ($("prompt").value.trim() || image) $("composer").requestSubmit();
+      else $("prompt").focus();
+      return;
+    }
+    if (action === "newline") {
+      collapseOptions();
+      insertPromptText("\n");
+      return;
+    }
+    if (action === "toggle-all") {
+      toggleAllCollapsibles();
+      return;
+    }
+    if (action === "command") {
+      collapseOptions();
+      if (!$("prompt").value.trim()) insertPromptText("/");
+      else $("prompt").focus();
+      return;
+    }
+    if (action === "close") closeOverlays();
   }
 
   function renderMessage(event, live) {
@@ -842,8 +980,8 @@
     }
     const stored = blocks.get(key);
     stored.text += content.text || "";
-    stored.body.innerHTML = H.markdown(stored.text);
-    if (live && event.role !== "thought") scrollTranscript();
+    if (live) scheduleMessageRender(stored, event.role !== "thought");
+    else stored.body.innerHTML = H.markdown(stored.text);
   }
 
   function setToolExpanded(entry, expanded) {
@@ -1058,6 +1196,8 @@
 
   function renderConfigs(options) {
     const target = $("configs");
+    const section = $("composerConfigSection");
+    if (section) section.hidden = !(options && options.length);
     target.innerHTML = "";
     for (const option of options || []) {
       if (option.type === "boolean") {
@@ -1227,16 +1367,20 @@
       const suffix = state.installed === false ? " · not installed" : state.running ? " · running" : "";
       return `<option value="${H.escapeHtml(entry.id)}">${H.escapeHtml(entry.label + suffix)}</option>`;
     }).join("");
-    const remembered = await storage.get("last_cwd");
-    if (!remembered?.path) {
+    let cwd = current?.cwd || wantedCwd || "";
+    if (!cwd) {
+      const remembered = await storage.get("last_cwd");
+      cwd = remembered?.path || "";
+    }
+    if (!cwd) {
       try {
         const home = await H.backend("/api/fs/dirs");
-        remembered.path = home.path;
+        cwd = home.path || "";
       } catch {}
     }
     const requested = preselect || registry.default || context?.config?.default_harness;
     if (choices.some((entry) => entry.id === requested)) $("newHarness").value = requested;
-    $("newCwd").value = remembered?.path || "";
+    $("newCwd").value = cwd;
     updateNewHarnessHint();
     openModal("newModal");
     $("newTitleInput").focus();
@@ -1421,6 +1565,10 @@
       const expanded = $("composerTools").classList.toggle("expanded");
       $("optionsToggle").setAttribute("aria-expanded", String(expanded));
     };
+    $("hotkeyList").querySelectorAll("[data-hotkey]").forEach((button) => {
+      button.onclick = () => runHotkey(button.dataset.hotkey);
+    });
+    $("attachButton").onclick = () => $("imageInput").click();
     $("toggleThoughts").onclick = () => {
       hideThoughts = !hideThoughts;
       applyView();
@@ -1458,7 +1606,7 @@
     $("imageInput").onchange = async (event) => {
       try {
         image = await readImage(event.target.files?.[0]);
-        $("imageName").textContent = image ? "Image attached" : "Attach";
+        $("imageName").textContent = image ? "Attached" : "Attach";
         $("composerError").hidden = true;
       } catch (error) {
         $("composerError").textContent = errorText(error);
@@ -1517,13 +1665,7 @@
     });
     document.addEventListener("keydown", (event) => {
       if (event.key === "Escape") {
-        if (!$("deleteModal").hidden) {
-          finishDelete(false);
-          return;
-        }
-        closeModal("newModal");
-        closeModal("dirModal");
-        closeRail();
+        closeOverlays();
         return;
       }
       const target = event.target;
@@ -1534,9 +1676,7 @@
       const commandE = (event.metaKey || event.ctrlKey) && event.shiftKey && event.key.toLowerCase() === "e";
       if (!altE && !commandE) return;
       event.preventDefault();
-      const anyExpanded = [...toolEls.values()].some((entry) => entry.expanded)
-        || [...$("transcript").querySelectorAll(".message.thought")].some((block) => !block.classList.contains("collapsed"));
-      applyAllCollapsibles(!anyExpanded);
+      toggleAllCollapsibles();
     });
     window.addEventListener("resize", () => {
       if (window.innerWidth > 760) closeRail();

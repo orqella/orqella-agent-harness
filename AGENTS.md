@@ -41,15 +41,24 @@ keeps a native-workspace action for features the module does not mirror.
 - Overview cards open the full workspace through the `module.open` host API.
 - Existing harness history is discovered through ACP `session/list` and adopted
   on demand. Adopting registers the local row before `session/load` so replayed
-  history has a transcript to land in. Never scan harness-specific storage.
+  history has a transcript to land in. Never scan harness-specific storage. The
+  rail keeps discovered history under a collapsed section and surfaces a history
+  session only while it is actually running.
 - Delete calls ACP `session/delete` when advertised, removes the local record and
   transcript, and records a tombstone in `data/hidden_sessions.json` so a cached
   `session/list` cannot resurrect the conversation. Deleting history directly
   uses the same tombstone/native-delete path.
 - Thoughts/tools visibility is a client-side view toggle; do not remove events
   from the transcript for it.
+- Streaming chunks are coalesced before markdown is re-rendered. Rebuilding a
+  whole message per delta is quadratic DOM work and can keep a web process at a
+  full core; keep the scheduled render path.
+- The composer Hotkeys panel is the shortcut reference. Every row is a button
+  that performs its action, so touch clients are not shown keys they cannot use.
 - Historical `status` events are not authoritative. Skip them during transcript
   replay; the session row/WS `ready` event and native activity hint drive the
+  header. For managed-service sessions the live session times override the
+  stored status, and `idle`/`working` must mean the same thing in the rail and
   header.
 - Opening a session may refresh history from the harness when its activity is
   newer than the stored transcript. The refresh endpoint preserves a backup and

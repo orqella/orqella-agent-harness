@@ -45,15 +45,18 @@ harness, folder, and optional title. Each session has its own cwd, transcript,
 model and mode selectors, and process slot. Sessions can run concurrently up to
 the configured limit.
 
-The rail lists both sessions created through Orqella and sessions the harness
-already knows about. History comes from the harness (ACP `session/list` or its
-managed service); choose one and it is adopted into Orqella with its transcript
-replayed. This is how the full OpenCode history appears alongside new sessions.
+The rail lists sessions created through Orqella. Sessions the harness already
+knows about are kept under a collapsed **History** group; a history session that
+is currently running stays visible above it. History comes from the harness (ACP
+`session/list` or its managed service); choose one and it is adopted into Orqella
+with its transcript replayed. This is how the full OpenCode history appears
+alongside new sessions.
 
-The header stays to one compact line. Model/mode selectors and image attach live
-behind **Options** in the composer on every screen size, so the transcript keeps
-the available height. **Enter** sends a prompt; **Shift+Enter** inserts a new
-line.
+The header stays to one compact line. **Hotkeys** in the composer lists each
+shortcut with its action, and every row is also a button so the same actions
+work on a touchscreen. Session model/mode options appear in that panel when the
+harness reports them, and image attach is a button beside it. **Enter** sends a
+prompt; **Shift+Enter** inserts a new line.
 
 Type **/** in the composer to open the slash-command menu. OpenCode lists its
 project commands plus `/compact`; ACP harnesses list the commands they advertise
@@ -83,7 +86,9 @@ from reappearing.
 OpenCode sessions use its managed service rather than a private ACP server. That
 means a prompt sent here appears in the OpenCode app, and a prompt sent from
 another OpenCode client appears here live. The rail and header mark a session
-**active** while the shared service is busy.
+**working** while the shared service is busy. That state is read from the live
+service, not just the stored status, so turns started in another client and
+sidecar restarts do not leave the header stale.
 
 The transcript shows:
 

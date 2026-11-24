@@ -86,6 +86,15 @@
       $("cwdValue").title = cwd;
       return;
     }
+    try {
+      const home = await backend("/api/fs/dirs");
+      if (home.path) {
+        cwd = home.path;
+        $("cwdValue").textContent = cwd;
+        $("cwdValue").title = cwd;
+        return;
+      }
+    } catch {}
     $("cwdValue").textContent = "Choose a folder";
     $("cwdValue").title = "Workspace folder";
   }

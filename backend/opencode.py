@@ -265,7 +265,7 @@ def activity(config, host_home, limit=200):
     read-only hint; failures are silent and never start a process.
     """
     if not configured_base_is_local(config):
-        return {}
+        return None
     try:
         base = service_base_url(config, host_home)
         request = Request(
@@ -275,7 +275,7 @@ def activity(config, host_home, limit=200):
         with urlopen(request, timeout=3) as response:
             payload = json.loads(response.read().decode() or "{}")
     except Exception:
-        return {}
+        return None
     rows = payload.get("data") if isinstance(payload, dict) else None
     if not isinstance(rows, list):
         return {}
