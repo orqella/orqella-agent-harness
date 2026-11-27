@@ -22,46 +22,11 @@
     return date.toLocaleDateString(undefined, { month: "short", day: "numeric" });
   };
 
-  /* Small, sanitized markdown renderer: fenced code, inline code, bold,
-     italic, links, lists, and paragraphs. No raw HTML passes through. */
-  const markdown = (value) => {
-    const source = String(value ?? "");
-    const chunks = source.split(/```/);
-    let output = "";
-    chunks.forEach((chunk, index) => {
-      if (index % 2 === 1) {
-        const firstBreak = chunk.indexOf("\n");
-        const language = firstBreak > 0 && !chunk.slice(0, firstBreak).includes(" ") ? chunk.slice(0, firstBreak) : "";
-        const code = firstBreak > 0 && language ? chunk.slice(firstBreak + 1) : chunk;
-        output += `<pre class="md-code" data-lang="${escapeHtml(language)}"><code>${escapeHtml(code.replace(/\n$/, ""))}</code></pre>`;
-        return;
-      }
-      const paragraphs = chunk.split(/\n{2,}/);
-      for (const paragraph of paragraphs) {
-        const trimmed = paragraph.trim();
-        if (!trimmed) continue;
-        if (/^([-*]|\d+\.)\s+/m.test(trimmed) && trimmed.split("\n").every((line) => /^([-*]|\d+\.)\s+/.test(line.trim()))) {
-          const ordered = /^\d+\.\s+/.test(trimmed.trim());
-          const items = trimmed.split("\n").map((line) => line.replace(/^\s*([-*]|\d+\.)\s+/, "")).map(inline).join("</li><li>");
-          output += `<${ordered ? "ol" : "ul"}><li>${items}</li></${ordered ? "ol" : "ul"}>`;
-          continue;
-        }
-        if (/^#{1,4}\s+/.test(trimmed)) {
-          const level = trimmed.match(/^#+/)[0].length;
-          output += `<h${level + 2}>${inline(trimmed.replace(/^#+\s+/, ""))}</h${level + 2}>`;
-          continue;
-        }
-        output += `<p>${inline(trimmed).replace(/\n/g, "<br>")}</p>`;
-      }
-    });
-    return output || `<p class="muted">${escapeHtml(source)}</p>`;
-  };
-
-  const inline = (value) => escapeHtml(value)
-    .replace(/`([^`]+)`/g, "<code>$1</code>")
-    .replace(/\*\*([^*]+)\*\*/g, "<strong>$1</strong>")
-    .replace(/(^|\W)\*([^*\s][^*]*)\*/g, "$1<em>$2</em>")
-    .replace(/\[([^\]]+)\]\((https?:\/\/[^\s)]+|\/[^\s)]*)\)/g, '<a href="$2" target="_blank" rel="noreferrer noopener">$1</a>');
+  // The GFM renderer is bundled in ui/vendor/markdown.js. It sanitizes raw
+  // HTML with DOMPurify and preserves single line breaks in chat messages.
+  const markdown = (value) => window.OrqellaMarkdown
+    ? window.OrqellaMarkdown.render(value)
+    : `<p>${escapeHtml(value)}</p>`;
 
   const stripAnsi = (value) => String(value ?? "")
     .replace(/\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)/g, "")

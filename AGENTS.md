@@ -20,6 +20,8 @@ keeps a native-workspace action for features the module does not mirror.
 - `ui/overview.html` + `overview.js` — harness switcher, prompt launcher, recent
   sessions.
 - `ui/settings.html` + `settings.js` — agent registry editor, embedded in Settings → Agents.
+- `ui/vendor/markdown.js` — bundled CommonMark/GFM renderer (marked + DOMPurify)
+  used by `common.js` for chat and tool output.
 
 ## Contracts
 
