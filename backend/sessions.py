@@ -31,6 +31,82 @@ def local_id(harness_id):
     return f"{harness_id}-{uuid.uuid4().hex[:16]}"
 
 
+def model_value(value):
+    """Normalize a model reference for the UI and persisted session rows."""
+    if not isinstance(value, dict):
+        return None
+    provider = str(value.get("providerID") or value.get("provider") or "").strip()
+    model_id = str(value.get("id") or value.get("value") or "").strip()
+    label = str(value.get("label") or value.get("name") or "").strip()
+    variant = str(value.get("variant") or "").strip()
+    if not model_id and not label:
+        return None
+    if not label:
+        label = model_id
+    if not model_id:
+        model_id = label
+    return {
+        "id": model_id,
+        "label": label,
+        "provider": provider,
+        "variant": variant,
+    }
+
+
+def model_from_config_options(options):
+    """Read the current model from ACP session config options."""
+    def rows(values):
+        for row in values or []:
+            if not isinstance(row, dict):
+                continue
+            if isinstance(row.get("options"), list):
+                yield from rows(row["options"])
+            else:
+                yield row
+
+    for option in options or []:
+        if not isinstance(option, dict):
+            continue
+        category = str(option.get("category") or "").strip().lower()
+        ident = str(option.get("id") or "").strip().lower()
+        if category != "model" and ident != "model":
+            continue
+        current = option.get("currentValue")
+        if current is None or isinstance(current, (dict, list)):
+            continue
+        current = str(current)
+        if not current:
+            continue
+        label = current
+        for candidate in rows(option.get("options")):
+            if str(candidate.get("value")) == current:
+                label = str(candidate.get("name") or candidate.get("label") or current)
+                break
+        return {"id": current, "label": label, "provider": "", "variant": ""}
+    return None
+
+
+def model_from_models_state(state):
+    """Read a legacy ACP models state, when a harness reports one."""
+    if not isinstance(state, dict):
+        return None
+    current = str(state.get("currentModelId") or "").strip()
+    if not current:
+        return None
+    for row in state.get("availableModels") or []:
+        if not isinstance(row, dict):
+            continue
+        if str(row.get("modelId") or row.get("id") or "") != current:
+            continue
+        return model_value(
+            {
+                "id": current,
+                "label": row.get("name") or row.get("label") or current,
+            }
+        )
+    return {"id": current, "label": current, "provider": "", "variant": ""}
+
+
 def orqella_mcp_servers(config, host_home, binary=None, environ=None):
     """Build the ACP stdio MCP entry for the local Orqella gateway.
 
@@ -486,6 +562,7 @@ class SessionManager:
                     title or info.get("title") or "New session",
                 )
                 row["root_set"] = [cwd]
+                row["model"] = model_value(info.get("model"))
                 self._ensure_service_watch()
                 self._emit(row["id"], {"type": "status", "status": "idle"})
                 return self.public_session(row)
@@ -534,6 +611,7 @@ class SessionManager:
                 title or info.get("title") or "Imported session",
             )
             row["root_set"] = [cwd]
+            row["model"] = model_value(info.get("model"))
             self._ensure_service_watch()
             try:
                 rows, cursor = opencode_service.message_page(
@@ -721,6 +799,11 @@ class SessionManager:
             row["models"] = result["models"]
         if result.get("currentModeId"):
             row["current_mode"] = result["currentModeId"]
+        model = model_from_config_options(row.get("config_options"))
+        if not model:
+            model = model_from_models_state(row.get("models"))
+        if model:
+            row["model"] = model
 
     def native_activity(self, force=False):
         now = time.monotonic()
@@ -787,6 +870,10 @@ class SessionManager:
             "config_options": row.get("config_options") or [],
             "modes": row.get("modes") or [],
             "models": row.get("models") or [],
+            "model": row.get("model")
+            or model_from_config_options(row.get("config_options"))
+            or model_from_models_state(row.get("models"))
+            or model_value(row.get("service_model")),
             "current_mode": row.get("current_mode") or "",
             "agent_info": row.get("agent_info") or {},
             "usage": row.get("usage") or None,
@@ -1072,7 +1159,14 @@ class SessionManager:
             return
         if kind == "config_option_update":
             row["config_options"] = update.get("configOptions") or []
+            model = model_from_config_options(row["config_options"])
+            model_changed = bool(model) and row.get("model") != model
+            if model_changed:
+                row["model"] = model
             self._emit(session_id, {"type": "config", "config_options": row["config_options"]})
+            if model_changed:
+                self._emit(session_id, {"type": "model", "model": model})
+            self._save_sessions()
             return
         if kind == "current_mode_update":
             row["current_mode"] = update.get("currentModeId") or ""
@@ -1254,12 +1348,18 @@ class SessionManager:
         except Exception:
             return
         index = {str(row.get("id")): row for row in rows if isinstance(row, dict)}
+        changed = False
         for row in list(self.sessions.values()):
             if row.get("harness") != harness_id:
                 continue
             info = index.get(row.get("harness_session_id") or "")
             if not info:
                 continue
+            model = model_value(info.get("model"))
+            if model and row.get("model") != model:
+                row["model"] = model
+                self._emit(row["id"], {"type": "model", "model": model})
+                changed = True
             times = info.get("time") or {}
             try:
                 busy_ms = int(times.get("busy") or 0)
@@ -1272,6 +1372,8 @@ class SessionManager:
                 self.set_status(row["id"], "working")
             elif not busy and status in {"working", "waiting"}:
                 self.set_status(row["id"], "idle")
+        if changed:
+            self._save_sessions()
 
     def _service_claim(self, session_id, message_id):
         """Claim a message id so a local echo and the stream cannot duplicate it."""
@@ -1370,6 +1472,11 @@ class SessionManager:
         if kind == "session.step.started":
             if isinstance(data.get("model"), dict):
                 row["service_model"] = data["model"]
+                model = model_value(data["model"])
+                if model and row.get("model") != model:
+                    row["model"] = model
+                    self._emit(session_id, {"type": "model", "model": model})
+                    self._save_sessions()
             if row.get("status") not in {"working", "waiting"}:
                 self.set_status(session_id, "working")
             return
@@ -1404,16 +1511,22 @@ class SessionManager:
             return
 
         if kind == "session.model.selected":
-            model = data.get("model")
-            if isinstance(model, dict):
-                row["service_model"] = model
-                label = f"{model.get('providerID')}/{model.get('id')}"
-                if model.get("variant"):
-                    label += f"#{model['variant']}"
+            value = data.get("model")
+            if isinstance(value, dict):
+                row["service_model"] = value
+                model = model_value(value)
+                changed = bool(model) and row.get("model") != model
+                if changed:
+                    row["model"] = model
+                label = f"{value.get('providerID')}/{value.get('id')}"
+                if value.get("variant"):
+                    label += f"#{value['variant']}"
                 self._emit(
                     session_id,
                     {"type": "notice", "update": {"title": f"Model: {label}"}},
                 )
+                if changed:
+                    self._emit(session_id, {"type": "model", "model": model})
                 self._save_sessions()
             return
         if kind == "session.agent.selected":
@@ -2087,6 +2200,13 @@ class SessionManager:
                 )
             except Exception as error:  # noqa: BLE001 - HTTP boundary
                 raise ValueError(str(error)) from error
+            model = model_value(
+                {"providerID": provider_id, "id": model_id, "variant": variant or ""}
+            )
+            if model and row.get("model") != model:
+                row["model"] = model
+                self._emit(session_id, {"type": "model", "model": model})
+                self._save_sessions()
             return {"session": self.public_session(row)}
         if name.lower() == "agent":
             value = text.strip()
@@ -2278,15 +2398,28 @@ class SessionManager:
     def config(self, session_id, config_id, value, boolean=False):
         row = self.get(session_id)
         if self.service_transport(self.entry(row["harness"])):
-            return {"config_options": row.get("config_options") or []}
+            return {
+                "config_options": row.get("config_options") or [],
+                "session": self.public_session(row),
+            }
         connection = self.connections.get(row["harness"])
         if not connection or not row.get("harness_session_id"):
             raise ValueError("this session is not connected")
         result = connection.set_config(row["harness_session_id"], config_id, value, boolean)
         if isinstance(result, dict) and result.get("configOptions"):
             row["config_options"] = result["configOptions"]
+            model = model_from_config_options(result["configOptions"])
+            model_changed = bool(model) and row.get("model") != model
+            if model_changed:
+                row["model"] = model
             self._emit(session_id, {"type": "config", "config_options": result["configOptions"]})
-        return {"config_options": row.get("config_options") or []}
+            if model_changed:
+                self._emit(session_id, {"type": "model", "model": model})
+            self._save_sessions()
+        return {
+            "config_options": row.get("config_options") or [],
+            "session": self.public_session(row),
+        }
 
     # -- ACP host ----------------------------------------------------------
 

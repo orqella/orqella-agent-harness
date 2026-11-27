@@ -99,6 +99,8 @@ class SessionManagerTests(unittest.TestCase):
         self.assertEqual(created["status"], "idle")
         self.assertEqual(created["cwd"], self.workspace)
         self.assertTrue(created["config_options"])
+        self.assertEqual(created["model"]["id"], "mock-1")
+        self.assertEqual(created["model"]["label"], "Mock One")
         self.assertTrue(created["harness_session_id"].startswith("sess_mock_"))
         self.assertEqual(self.manager.list("mock")[0]["id"], created["id"])
 
@@ -220,12 +222,19 @@ class SessionManagerTests(unittest.TestCase):
             mock.patch.object(
                 sessions_module.opencode_service,
                 "create",
-                return_value={"id": "ses_service", "title": "Service session"},
+                return_value={
+                    "id": "ses_service",
+                    "title": "Service session",
+                    "model": {"providerID": "p", "id": "m", "variant": "high"},
+                },
             ),
         ):
             created = self.manager.create("opencode", self.workspace)
         self.assertEqual(created["harness_session_id"], "ses_service")
         self.assertEqual(created["title"], "Service session")
+        self.assertEqual(created["model"]["provider"], "p")
+        self.assertEqual(created["model"]["id"], "m")
+        self.assertEqual(created["model"]["variant"], "high")
         session_id = created["id"]
 
         with (
@@ -264,6 +273,7 @@ class SessionManagerTests(unittest.TestCase):
             item={"type": "user", "payload": {"text": "hello"}},
         )
         event("session.execution.started")
+        event("session.step.started", model={"providerID": "p", "id": "m"})
         event("session.reasoning.started", assistantMessageID="msg_a", ordinal=0)
         event("session.reasoning.delta", assistantMessageID="msg_a", ordinal=0, delta="thinking")
         event("session.reasoning.ended", assistantMessageID="msg_a", ordinal=0, text="thinking harder")
@@ -300,6 +310,7 @@ class SessionManagerTests(unittest.TestCase):
         self.assertIn("/tmp/workspace", tools[-1]["content"][0]["content"]["text"])
         self.assertEqual(self.manager.sessions[session_id]["status"], "idle")
         self.assertEqual(len(self.session_events(session_id, "turn_end")), 1)
+        self.assertEqual(self.manager.sessions[session_id]["model"]["id"], "m")
 
     def test_service_transport_refresh_replays_messages(self):
         self.use_service_registry()
@@ -429,6 +440,8 @@ class SessionManagerTests(unittest.TestCase):
             self.assertEqual(set_model.call_args.args[3], "p")
             self.assertEqual(set_model.call_args.args[4], "m")
             self.assertEqual(set_model.call_args.args[5], "high")
+            self.assertEqual(self.manager.public_session(row)["model"]["id"], "m")
+            self.assertEqual(self.session_events(row["id"], "model")[-1]["model"]["variant"], "high")
             with mock.patch.object(
                 sessions_module.opencode_service, "set_agent", return_value={}
             ) as set_agent:
@@ -489,6 +502,30 @@ class SessionManagerTests(unittest.TestCase):
         notices = self.session_events(row["id"], "notice")
         self.assertEqual(notices[0]["update"]["title"], "Model: p/m#high")
         self.assertEqual(notices[1]["update"]["title"], "Agent: plan")
+        self.assertEqual(
+            self.manager.public_session(row)["model"],
+            {"id": "m", "label": "m", "provider": "p", "variant": "high"},
+        )
+        models = self.session_events(row["id"], "model")
+        self.assertEqual(models[-1]["model"]["variant"], "high")
+
+    def test_service_resync_updates_the_current_model(self):
+        self.use_service_registry()
+        row = self.manager._new_row("opencode", "ses_resync", self.workspace, "Resync")
+        rows = [
+            {
+                "id": "ses_resync",
+                "model": {"providerID": "p", "id": "m2"},
+                "time": {},
+            }
+        ]
+        with mock.patch.object(
+            sessions_module.opencode_service, "list_sessions", return_value=rows
+        ):
+            self.manager._service_resync("opencode")
+        self.assertEqual(self.manager.public_session(row)["model"]["id"], "m2")
+        models = self.session_events(row["id"], "model")
+        self.assertEqual(models[-1]["model"]["id"], "m2")
 
     def test_transcript_sequence_survives_a_restart(self):
         row = self.manager._new_row("mock", "ses_seq", self.workspace, "Seq")
@@ -542,6 +579,7 @@ class SessionManagerTests(unittest.TestCase):
             "id": "ses_remote",
             "title": "Remote session",
             "location": {"directory": self.workspace},
+            "model": {"providerID": "p", "id": "m"},
         }
         messages = [{"id": "msg_1", "type": "user", "text": "remote"}]
         with (
@@ -556,6 +594,7 @@ class SessionManagerTests(unittest.TestCase):
             adopted = self.manager.adopt("opencode", "ses_remote", self.workspace)
         self.assertEqual(adopted["title"], "Remote session")
         self.assertEqual(adopted["harness_session_id"], "ses_remote")
+        self.assertEqual(adopted["model"]["id"], "m")
 
         discovered_rows = [
             {
@@ -587,6 +626,9 @@ class SessionManagerTests(unittest.TestCase):
         result = self.manager.config(created["id"], "model", "mock-2")
         model = next(option for option in result["config_options"] if option["id"] == "model")
         self.assertEqual(model["currentValue"], "mock-2")
+        self.assertEqual(result["session"]["model"]["id"], "mock-2")
+        self.assertEqual(result["session"]["model"]["label"], "Mock Two")
+        self.assertEqual(self.session_events(created["id"], "model")[-1]["model"]["id"], "mock-2")
 
     def test_prompt_reconnects_a_restarted_agent(self):
         created = self.manager.create("mock", self.workspace)

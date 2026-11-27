@@ -1,11 +1,26 @@
-# Agent Harness
+<p align="center">
+  <a href="https://orqella.io">
+    <img src="logo.png" alt="Orqella" width="96">
+  </a>
+</p>
+
+<h1 align="center">Agent Harness</h1>
+
+<p align="center">
+  <a href="https://orqella.io">Website</a> ·
+  <a href="https://github.com/orqella/orqella#install">Quick start</a> ·
+  <a href="https://github.com/orqella/orqella#modules">Modules</a> ·
+  <a href="https://github.com/orqella/orqella#desktop-client">Desktop client</a> ·
+  <a href="https://orqella.io/docs/">Documentation</a>
+</p>
 
 ![Agent Harness with a session, plan, usage, transcript, and expanded tool calls](docs/screenshot.png)
 
 Agent Harness is the Orqella module for working with coding agents. It gives
 every supported harness one workspace: a session list, a conversation view with
 streamed messages and tool activity, approvals, plans, diffs, terminals, and
-per-session model or mode controls.
+per-session model and mode controls. The workspace header shows the active
+model for the open session.
 
 OpenCode, Claude Code, Codex, Gemini CLI, and other ACP agents run through the
 Agent Client Protocol. Any harness with a web frontend can expose an **Open

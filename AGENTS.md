@@ -32,6 +32,10 @@ keeps a native-workspace action for features the module does not mirror.
   when enabled. The server command must be the daemon's `ORQELLA_BIN` (or a
   verified fallback), and its `HOME` must be the host home, not the sidecar's
   sandboxed `HOME`.
+- Every public session exposes the active model as
+  `{id,label,provider,variant}`. Keep it updated from ACP config options and
+  managed-service session info, and emit a `model` event on change so the
+  workspace header stays current.
 - Harnesses use their own login and configuration. The module never stores API
   keys or service passwords. OpenCode's pairing token is a URL handoff and is
   treated as sensitive.

@@ -60,6 +60,31 @@
     return status === "starting" ? "working" : status;
   };
 
+  const modelName = (model) => model?.label || model?.id || "";
+  const modelDetail = (model) => {
+    if (!model) return "";
+    const base = model.provider ? `${model.provider}/${model.id}` : model.id || model.label || "";
+    return model.variant ? `${base}#${model.variant}` : base;
+  };
+  const modelTitle = (model) => {
+    const name = modelName(model);
+    const detail = modelDetail(model);
+    return detail && detail !== name ? `${name} · ${detail}` : name;
+  };
+  const renderModel = (session = current) => {
+    const chip = $("modelChip");
+    const model = session?.model;
+    if (!model || !modelName(model)) {
+      chip.hidden = true;
+      chip.textContent = "";
+      chip.removeAttribute("title");
+      return;
+    }
+    chip.hidden = false;
+    chip.textContent = `Model · ${modelName(model)}`;
+    chip.title = `Current model: ${modelTitle(model)}`;
+  };
+
   const setStatus = (status) => {
     statusValue = status || "idle";
     const chip = $("statusChip");
@@ -107,6 +132,7 @@
     $("railNote").textContent = message || "";
     setTitle("Workspace");
     setStatus("idle");
+    renderModel(null);
   };
 
   const errorText = (error) => error?.message || String(error || "Something went wrong");
@@ -510,6 +536,7 @@
     $("sessionInfo").innerHTML = renderSessionInfo(session);
     setTitle(session.title || harness(session.harness).label);
     setStatus(displayStatus(session));
+    renderModel(session);
     usage = session.usage || null;
     renderUsage();
     renderContextChip();
@@ -543,6 +570,7 @@
       ["Session", session.id],
       ["Harness id", session.harness_session_id || "—"],
     ];
+    if (session.model) rows.push(["Model", modelTitle(session.model)]);
     const agent = session.agent_info || {};
     if (agent.name) rows.push(["Agent", `${agent.name}${agent.version ? " " + agent.version : ""}`]);
     return `<dl class="info-list">${rows.map(([key, value]) => `<dt>${H.escapeHtml(key)}</dt><dd class="mono small">${H.escapeHtml(value)}</dd>`).join("")}</dl>`;
@@ -565,6 +593,7 @@
           setStatus(displayStatus(current));
           setTitle(current.title || current.id);
           $("sessionInfo").innerHTML = renderSessionInfo(current);
+          renderModel(current);
           renderConfigs(current.config_options || []);
           usage = event.session.usage || usage;
           renderUsage();
@@ -620,7 +649,16 @@
         if (live) renderPermission(event);
         return;
       case "permission_resolved": return resolvePermissionCard(event);
-      case "config": return renderConfigs(event.config_options || []);
+      case "config":
+        if (current) current.config_options = event.config_options || [];
+        return renderConfigs(event.config_options || []);
+      case "model":
+        if (live && current && event.model) {
+          current.model = event.model;
+          renderModel(current);
+          $("sessionInfo").innerHTML = renderSessionInfo(current);
+        }
+        return;
       case "mode": return;
       case "commands":
         if (current) commandCache.set(current.id, event.commands || []);
@@ -1226,6 +1264,12 @@
         value,
         ...(boolean ? { type: "boolean" } : {}),
       });
+      if (current) {
+        current.config_options = result.config_options || current.config_options;
+        if (result.session?.model) current.model = result.session.model;
+        renderModel(current);
+        $("sessionInfo").innerHTML = renderSessionInfo(current);
+      }
       renderConfigs(result.config_options || []);
     } catch (error) {
       toast(errorText(error));
