@@ -149,6 +149,34 @@ credentials are never stored there; each harness uses its own login and config
 files. The registry's default agent is the default for new conversations and
 the overview card.
 
+### Orqella MCP tools
+
+Every new, loaded, or resumed ACP session receives the local Orqella MCP gateway
+as a stdio MCP server when `orqella` is installed. The daemon injects
+`ORQELLA_BIN` into the sidecar environment, so the harness launches the exact
+binary that is serving the dashboard. The MCP process gets the real host
+`HOME`, not the sidecar's sandboxed home, and therefore sees the daemon's admin
+token and module store.
+
+The module config has two controls:
+
+- **Give sessions Orqella tools** (default on) adds or removes the server.
+- **Orqella MCP profile** chooses `read` (default) or `dev`. `dev` also exposes
+  module install/control/configure and build tools; `admin` is never injected.
+
+The agent can then inspect the dashboard, its modules, logs, and builds while
+it works in the conversation. If the binary cannot be found, sessions still
+start normally and the sidecar log records one warning.
+
+OpenCode's managed REST service does not accept per-session MCP servers yet, so
+the harness installs one service-wide entry named `orqella-harness` in the
+running OpenCode service. That entry is also visible to native OpenCode
+sessions until the service restarts. Turning the setting off and restarting the
+harness sidecar removes it when the service is reachable; ACP harnesses
+(Claude Code, Codex, Gemini, custom ACP) receive the server per session instead. See
+[`docs/MCP.md`](https://github.com/orqella/orqella/blob/main/docs/MCP.md) for
+the tool surface and the gateway's security model.
+
 ## Permissions
 
 | Permission | Why |

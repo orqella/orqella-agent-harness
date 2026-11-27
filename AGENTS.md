@@ -24,7 +24,12 @@ keeps a native-workspace action for features the module does not mirror.
 ## Contracts
 
 - Use `ORQELLA_HOST_HOME` for host paths; `HOME` is the module home. Strip
-  `ORQELLA_*` variables from every child process.
+  `ORQELLA_*` variables from every child process, except the deliberate
+  `ORQELLA_BIN`/host-`HOME` handoff for the Orqella MCP server.
+- ACP sessions receive the Orqella MCP server from `SessionManager.mcp_servers`
+  when enabled. The server command must be the daemon's `ORQELLA_BIN` (or a
+  verified fallback), and its `HOME` must be the host home, not the sidecar's
+  sandboxed `HOME`.
 - Harnesses use their own login and configuration. The module never stores API
   keys or service passwords. OpenCode's pairing token is a URL handoff and is
   treated as sensitive.

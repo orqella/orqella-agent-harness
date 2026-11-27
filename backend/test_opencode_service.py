@@ -38,6 +38,38 @@ class ServiceClientTests(unittest.TestCase):
         self.assertIn("cursor=next-page", request.call_args_list[1].args[3])
 
 
+class ServiceMcpTests(unittest.TestCase):
+    def test_orqella_server_is_put_with_host_home_and_profile(self):
+        with mock.patch.object(
+            opencode_service, "request", return_value={}
+        ) as request:
+            installed = opencode_service.ensure_mcp(
+                ENTRY,
+                "/home/test",
+                [
+                    {
+                        "name": "orqella-harness",
+                        "command": "/usr/bin/orqella",
+                        "args": ["mcp", "--profile", "read"],
+                        "env": [{"name": "HOME", "value": "/home/test"}],
+                    }
+                ],
+            )
+        self.assertEqual(installed, ["orqella-harness"])
+        self.assertEqual(request.call_args.args[2], "PUT")
+        self.assertEqual(
+            request.call_args.args[3], "/api/experimental/mcp/orqella-harness"
+        )
+        config = request.call_args.args[4]["config"]
+        self.assertEqual(config["type"], "local")
+        self.assertEqual(
+            config["command"],
+            ["/usr/bin/orqella", "mcp", "--profile", "read"],
+        )
+        self.assertEqual(config["environment"], {"HOME": "/home/test"})
+        self.assertFalse(config["codemode"])
+
+
 if __name__ == "__main__":
     unittest.main()
 

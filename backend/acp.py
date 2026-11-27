@@ -469,8 +469,18 @@ class AcpConnection:
     def session_capabilities(self):
         return self.capabilities.get("sessionCapabilities") or {}
 
+    def mcp_servers(self):
+        provider = getattr(self.host, "mcp_servers", None)
+        if not callable(provider):
+            return []
+        try:
+            servers = provider()
+        except Exception:
+            return []
+        return servers if isinstance(servers, list) else []
+
     def new_session(self, cwd, additional_directories=None):
-        params = {"cwd": cwd, "mcpServers": []}
+        params = {"cwd": cwd, "mcpServers": self.mcp_servers()}
         if additional_directories and self.session_capabilities().get("additionalDirectories") is not None:
             params["additionalDirectories"] = additional_directories
         result = self.request("session/new", params, timeout=120)
@@ -483,7 +493,11 @@ class AcpConnection:
         return result
 
     def load_session(self, session_id, cwd, additional_directories=None):
-        params = {"sessionId": session_id, "cwd": cwd, "mcpServers": []}
+        params = {
+            "sessionId": session_id,
+            "cwd": cwd,
+            "mcpServers": self.mcp_servers(),
+        }
         if additional_directories and self.session_capabilities().get("additionalDirectories") is not None:
             params["additionalDirectories"] = additional_directories
         result = self.request("session/load", params, timeout=300)
@@ -494,7 +508,11 @@ class AcpConnection:
         return result or {}
 
     def resume_session(self, session_id, cwd, additional_directories=None):
-        params = {"sessionId": session_id, "cwd": cwd, "mcpServers": []}
+        params = {
+            "sessionId": session_id,
+            "cwd": cwd,
+            "mcpServers": self.mcp_servers(),
+        }
         if additional_directories and self.session_capabilities().get("additionalDirectories") is not None:
             params["additionalDirectories"] = additional_directories
         result = self.request("session/resume", params, timeout=120)

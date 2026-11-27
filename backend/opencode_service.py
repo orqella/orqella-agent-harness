@@ -293,6 +293,59 @@ def create(entry, host_home, cwd, title=""):
     return request(entry, host_home, "POST", "/api/session", body, start=True).get("data") or {}
 
 
+def healthy(entry, host_home):
+    try:
+        return opencode.service_health(config(entry), host_home)
+    except Exception:
+        return False
+
+
+def ensure_mcp(entry, host_home, servers, start=True):
+    """Install Orqella MCP servers into the managed OpenCode service.
+
+    OpenCode's REST session API does not accept per-session MCP servers yet, so
+    the harness adds its server to the service's dynamic MCP registry. The
+    harness-specific name avoids replacing a user's own `orqella` entry.
+    """
+    installed = []
+    for server in servers or []:
+        name = str(server.get("name") or "").strip()
+        command = str(server.get("command") or "").strip()
+        args = [str(arg) for arg in (server.get("args") or [])]
+        if not name or not command:
+            continue
+        environment = {}
+        for item in server.get("env") or []:
+            if isinstance(item, dict) and item.get("name"):
+                environment[str(item["name"])] = str(item.get("value") or "")
+        config = {
+            "type": "local",
+            "command": [command, *args],
+            "environment": environment,
+            "codemode": False,
+        }
+        request(
+            entry,
+            host_home,
+            "PUT",
+            f"/api/experimental/mcp/{quote(name, safe='')}",
+            {"config": config},
+            start=start,
+        )
+        installed.append(name)
+    return installed
+
+
+def remove_mcp(entry, host_home, name):
+    request(
+        entry,
+        host_home,
+        "DELETE",
+        f"/api/experimental/mcp/{quote(name, safe='')}",
+    )
+    return True
+
+
 def remove(entry, host_home, session_id):
     request(entry, host_home, "DELETE", f"/api/session/{quote(session_id, safe='')}")
     return True

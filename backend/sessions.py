@@ -31,6 +31,57 @@ def local_id(harness_id):
     return f"{harness_id}-{uuid.uuid4().hex[:16]}"
 
 
+def orqella_mcp_servers(config, host_home, binary=None, environ=None):
+    """Build the ACP stdio MCP entry for the local Orqella gateway.
+
+    The harness sidecar runs with a sandboxed HOME, so the MCP process gets the
+    real host home explicitly. The daemon injects ORQELLA_BIN; the PATH and
+    ``~/.cargo/bin`` fallbacks keep source and portable installs working.
+    """
+    config = config or {}
+    if not config.get("orqella_mcp", True):
+        return []
+    profile = str(config.get("orqella_mcp_profile") or "read").strip().lower()
+    if profile not in ("read", "dev"):
+        profile = "read"
+    environ = os.environ if environ is None else environ
+    home = host_home or environ.get("ORQELLA_HOST_HOME") or os.path.expanduser("~")
+    search_path = environ.get("PATH")
+    candidate = (
+        binary
+        or environ.get("ORQELLA_BIN")
+        or shutil.which("orqella", path=search_path)
+    )
+    if not candidate:
+        names = ["orqella.exe", "orqella"] if os.name == "nt" else ["orqella"]
+        for name in names:
+            fallback = os.path.join(home, ".cargo", "bin", name)
+            if os.path.isfile(fallback):
+                candidate = fallback
+                break
+    if not candidate:
+        return []
+    command = os.path.abspath(candidate)
+    if not os.path.isfile(command) or not os.access(command, os.X_OK):
+        return []
+    env = [{"name": "HOME", "value": home}]
+    if os.name == "nt":
+        env.append({"name": "USERPROFILE", "value": home})
+    portable = environ.get("ORQELLA_HOME")
+    if portable:
+        env.append({"name": "ORQELLA_HOME", "value": portable})
+    return [
+        {
+            # Keep a harness-specific label so the managed OpenCode service can
+            # install/update it without replacing a user's own `orqella` entry.
+            "name": "orqella-harness",
+            "command": command,
+            "args": ["mcp", "--profile", profile],
+            "env": env,
+        }
+    ]
+
+
 class Store:
     def __init__(self, root):
         self.root = root
@@ -171,8 +222,10 @@ class SessionManager:
         self._service_seen = {}
         self._service_tool_inputs = {}
         self._service_ready = set()
+        self._mcp_warned = False
         self._load_sessions()
         self._prune_transcripts()
+        self._ensure_running_service_mcp()
         if any(self.service_transport(self.entry(row.get("harness"))) for row in self.sessions.values()):
             self._ensure_service_watch()
 
@@ -220,6 +273,61 @@ class SessionManager:
 
     def service_transport(self, entry):
         return bool(entry) and entry.get("kind") == "acp" and entry.get("transport") == "opencode"
+
+    def ensure_service_mcp(self, entry, start=True):
+        """Install the Orqella MCP server into the managed OpenCode service."""
+        if not self.service_transport(entry):
+            return
+        servers = self.mcp_servers()
+        if not servers:
+            return
+        try:
+            opencode_service.ensure_mcp(
+                entry, self.host_home_dir, servers, start=start
+            )
+        except Exception as error:
+            self.log(f"could not add Orqella MCP to the OpenCode service: {error}")
+
+    def _ensure_running_service_mcp(self):
+        """Sync Orqella MCP into an already-running shared OpenCode service."""
+        servers = self.mcp_servers()
+        for entry in self.registry.get("harnesses", []):
+            if not self.service_transport(entry) or not entry.get("enabled", True):
+                continue
+            try:
+                if not opencode_service.healthy(entry, self.host_home_dir):
+                    continue
+                if servers:
+                    opencode_service.ensure_mcp(
+                        entry, self.host_home_dir, servers, start=False
+                    )
+                else:
+                    try:
+                        opencode_service.remove_mcp(
+                            entry, self.host_home_dir, "orqella-harness"
+                        )
+                    except Exception:
+                        pass
+            except Exception as error:
+                self.log(f"could not sync Orqella MCP to OpenCode: {error}")
+
+    def mcp_servers(self):
+        """MCP servers every new or resumed ACP session should connect to."""
+        servers = orqella_mcp_servers(
+            self.module_config,
+            self.host_home_dir,
+            binary=os.environ.get("ORQELLA_BIN"),
+        )
+        if (
+            not servers
+            and self.module_config.get("orqella_mcp", True)
+            and not self._mcp_warned
+        ):
+            self._mcp_warned = True
+            self.log(
+                "Orqella MCP binary was not found; harness sessions start without Orqella tools"
+            )
+        return servers
 
     def probe(self, harness_id):
         entry = self.entry(harness_id)
@@ -366,6 +474,7 @@ class SessionManager:
                         f"{len(live)} sessions are already open; close one or raise the concurrency limit"
                     )
             if self.service_transport(entry):
+                self.ensure_service_mcp(entry)
                 info = opencode_service.create(entry, self.host_home_dir, cwd, title)
                 session_id = str(info.get("id") or "")
                 if not session_id:
